@@ -334,8 +334,8 @@ def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, x: float, y: flo
     draw = ImageDraw.Draw(big)
     shift = np.array([-bx, -by], dtype=float)
     _draw_bubbles(draw, bubbles, ax, ay, bx, by, front=False)
-    # Outline copies go underneath everything as shifted polygons (a wide
-    # draw.line is several times slower).
+    # The rim is a slightly larger copy of each outline drawn underneath everything, because a wide
+    # draw.line is several times slower.
     rim = tint(rig.outline_color, pose.spin.z)
     for pts in _grown(outlines, rig.species.outline_px):
         draw.polygon((pts + shift).ravel().tolist(), fill=rim)
