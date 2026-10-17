@@ -7,7 +7,7 @@ import math
 from PIL import Image, ImageDraw, ImageFont
 
 from anatomy import Rig, compile_species
-from behavior import OrcaMode, World
+from behavior import OrcaMode, Transition, World
 from bubbles import Bubbles
 from projection import Pose
 from render import Layout, Sprite, render
@@ -73,7 +73,7 @@ def find_hunt(seed: int, shortest: float, longest: float, limit: float = 1200.0)
     stalk = None
     while world.t < limit:
         for e in world.step(DT):
-            if e.actor != "orca":
+            if not isinstance(e, Transition) or e.actor != "orca":
                 continue
             if e.new is OrcaMode.STALK and e.old is OrcaMode.CRUISE:
                 stalk = e.t

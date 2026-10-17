@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
-from behavior import FishMode, OrcaMode, World, orca_length
+from behavior import FishMode, OrcaMode, Transition, World, orca_length
 from kinematics import Rect
 
 DEFAULT_AREA = Rect(0, 0, 1920, 1032)
@@ -41,6 +41,8 @@ def simulate(seconds: float, seed: int, quiet: bool = False) -> Report:
     report = Report(seconds)
     for _ in range(round(seconds / DT)):
         for e in world.step(DT):
+            if not isinstance(e, Transition):
+                continue
             if not quiet:
                 print(e)
             if e.actor == "orca":

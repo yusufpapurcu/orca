@@ -130,6 +130,17 @@ class Transition:
         return f"[{self.t:7.2f}s] {self.actor} {self.old.name if self.old else 'start'} -> {self.new.name}"
 
 
+@dataclass(frozen=True)
+class Turn:
+    """The orca starts turning around, through the viewer's side or the far side."""
+
+    t: float
+    toward_viewer: bool
+
+    def __str__(self) -> str:
+        return f"[{self.t:7.2f}s] orca TURN {'toward' if self.toward_viewer else 'away from'} the viewer"
+
+
 class World:
     def __init__(self, area: Rect, length: float, rng: random.Random):
         self.area = area
@@ -140,7 +151,7 @@ class World:
         self.t = 0.0
         self.orca_rig = compile_species(ORCA)
         self.fish_rig = compile_species(SALMON)
-        self._events: list[Transition] = []
+        self._events: list[Transition | Turn] = []
 
         heading = rng.uniform(-math.pi, math.pi)
         body = Body.launch(*self._center(), heading)
@@ -149,7 +160,7 @@ class World:
         self.fish: Fish | None = None
         self._spawn_fish()
 
-    def step(self, dt: float) -> list[Transition]:
+    def step(self, dt: float) -> list[Transition | Turn]:
         self.t += dt
         self._step_orca(dt)
         if self.fish:
@@ -172,6 +183,14 @@ class World:
 
     def _emit(self, actor: str, old: Enum | None, new: Enum) -> None:
         self._events.append(Transition(self.t, actor, old, new))
+
+    def _steer_orca(self, target: float, rate: float, dt: float) -> None:
+        att = self.orca.body.att
+        k = att.k
+        steer(self.orca.body, target, rate, dt)
+        if att.k != k:
+            # the bulge of sin(yaw) between k * pi and (k + d) * pi has the sign of d * (-1) ** k
+            self._events.append(Turn(self.t, (att.k - k) * (-1) ** k > 0))
 
     def _margin(self, body: Body, speed_goal: float, gait: Gait) -> float:
         """Distance from an edge at which to start turning away: the turning radius plus the steering lag."""
@@ -289,7 +308,7 @@ class World:
         else:
             want = self._wander_heading(o, dt)
         target, boost = avoid_edges(b, want, self.area, self._margin(b, o.speed_goal, gait))
-        steer(b, target, gait.turn * boost, dt)
+        self._steer_orca(target, gait.turn * boost, dt)
         accelerate(b, o.speed_goal, gait.accel * self.unit, dt)
         advance(b, ORCA.beat_hz * (0.6 + 0.4 * b.speed / (ORCA_BEAT_SPEED * self.unit)), dt)
 
