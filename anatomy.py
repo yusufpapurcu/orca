@@ -236,9 +236,6 @@ def fin_height(flutter: float, phase: float) -> float:
     return max(0.3, 1.0 - flutter * dip + 0.25 * flutter * math.sin(2 * math.pi * phase))
 
 
-Triangle = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
-
-
 @dataclass(frozen=True)
 class BakedJaw:
     jaw: Jaw

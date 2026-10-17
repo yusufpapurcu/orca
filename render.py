@@ -4,8 +4,7 @@ The frame is the tight bounding box of the animal and its bubbles, not a fixed
 window: at 3x a canvas that covers every possible pose costs more than the
 drawing itself.
 
-Geometry is placed a whole part at a time with numpy, because a part is
-hundreds of points and the per-point Python was most of the frame.
+Geometry is placed a whole part at a time with numpy, since a part is hundreds of points.
 """
 
 from __future__ import annotations
