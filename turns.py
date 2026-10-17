@@ -59,8 +59,8 @@ class Swimmer:
     def snap(self) -> Body:
         return copy.deepcopy(self.body)
 
-    def draw(self, canvas: Image.Image, body: Body, dx: float = 0.0, dy: float = 0.0, alpha: float = 1.0) -> None:
-        s = render(self.rig, body.pose(), Bubbles(), self.lay, body.x + dx, body.y + dy)
+    def draw(self, canvas: Image.Image, body: Body, dx: float = 0.0, dy: float = 0.0, alpha: float = 1.0, jaw: float = 0.0) -> None:
+        s = render(self.rig, body.pose(0.0, jaw), Bubbles(), self.lay, body.x + dx, body.y + dy)
         img = s.image.convert("RGBA")
         if alpha < 1.0:
             img.putalpha(img.getchannel("A").point(lambda v: int(v * alpha)))
@@ -92,7 +92,7 @@ def _label(d: ImageDraw.ImageDraw, x: int, y: int, body: Body, k: int, dx: float
     d.text((x, y + 15), f"depth {a.z:+.2f}   dx {dx:+4.0f}", fill=INK, font=FONT)
 
 
-def turn_rows(kind: str, orca_len: float, dip: int, frames: int = 12, cols: int = 6) -> list[Image.Image]:
+def turn_rows(kind: str, orca_len: float, dip: int, jaw: float = 0.0, frames: int = 12, cols: int = 6) -> list[Image.Image]:
     sw, states = record_turn(kind, orca_len, dip)
     idx = [round(i * (len(states) - 1) / (frames - 1)) for i in range(frames)]
     sel = [states[i] for i in idx]
@@ -107,7 +107,7 @@ def turn_rows(kind: str, orca_len: float, dip: int, frames: int = 12, cols: int 
             k = r * cols + c
             body = sel[k]
             cell = Image.new("RGBA", row.size, (0, 0, 0, 0))
-            sw.draw(cell, body, c * cw + cw / 2 - body.x, ch / 2 - body.y)
+            sw.draw(cell, body, c * cw + cw / 2 - body.x, ch / 2 - body.y, jaw=jaw)
             row.alpha_composite(cell)
             d.line([(c * cw, 0), (c * cw, ch + label)], fill=GUIDE)
             d.line([(c * cw, ch / 2), (c * cw + cw, ch / 2)], fill=GUIDE)
@@ -117,17 +117,17 @@ def turn_rows(kind: str, orca_len: float, dip: int, frames: int = 12, cols: int 
     path = Image.new("RGBA", (cw * cols, ch), BLUE)
     margin = (path.width - (max(xs) - min(xs))) / 2 - min(xs)
     for k, body in enumerate(sel):
-        sw.draw(path, body, margin + body.x - x0 - body.x, ch / 2 - body.y, alpha=0.18 + 0.82 * (k / (frames - 1)) ** 2)
-    ImageDraw.Draw(path).text((8, 6), f"{kind}, {'toward' if dip > 0 else 'away from'} the viewer: all {frames} frames at true screen positions, newest solid", fill=INK, font=FONT)
+        sw.draw(path, body, margin + body.x - x0 - body.x, ch / 2 - body.y, alpha=0.18 + 0.82 * (k / (frames - 1)) ** 2, jaw=jaw)
+    ImageDraw.Draw(path).text((8, 6), f"{kind}{', jaw open' if jaw else ''}, {'toward' if dip > 0 else 'away from'} the viewer: all {frames} frames at true screen positions, newest solid", fill=INK, font=FONT)
     return rows + [path]
 
 
 def make_turn_sheet(orca_len: float = 260.0) -> Image.Image:
-    """Twelve frames across a turn toward the viewer and twelve across a turn away, for the orca and the salmon."""
+    """Twelve frames across a turn toward the viewer and twelve across a turn away, for the orca, the orca with its jaw open and the salmon."""
     sections: list[Image.Image] = []
-    for kind, length in (("orca", orca_len), ("salmon", orca_len * 2.4)):
+    for kind, length, jaw in (("orca", orca_len, 0.0), ("orca", orca_len, 1.0), ("salmon", orca_len * 2.4, 0.0)):
         for dip in (1, -1):
-            sections += turn_rows(kind, length, dip)
+            sections += turn_rows(kind, length, dip, jaw)
     w = max(s.width for s in sections)
     sheet = Image.new("RGBA", (w, sum(s.height + 6 for s in sections)), (60, 78, 98, 255))
     y = 0

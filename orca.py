@@ -67,7 +67,7 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
             t2 = time.perf_counter()
             render_ms.append((t1 - t0) * 1000)
             total_ms.append((t2 - t0) * 1000)
-            (turning_ms if o.body.att.turning or (f and f.body.att.turning) else calm_ms).append((t2 - t0) * 1000)
+            (turning_ms if o.body.att.turning or (f and f.body.att.turning) else calm_ms).append(((t2 - t0) * 1000, (t1 - t0) * 1000))
             last = sprite
             n += 1
 
@@ -96,7 +96,8 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
               f"render+present avg={sum(total_ms) / len(total_ms):.2f}ms max={max(total_ms):.2f}ms")
     for name, ms in (("turning", turning_ms), ("calm", calm_ms)):
         if ms:
-            print(f"  {name}: frames={len(ms)} render+present avg={sum(ms) / len(ms):.2f}ms max={max(ms):.2f}ms")
+            tot, rend = zip(*ms)
+            print(f"  {name}: frames={len(ms)} render+present avg={sum(tot) / len(tot):.2f}ms (render {sum(rend) / len(rend):.2f}ms) max={max(tot):.2f}ms")
     if snapshot and last is not None:
         last.image.convert("RGBA").save(snapshot)
         print(f"snapshot saved to {snapshot}")
