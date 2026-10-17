@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
+from typing import Callable
 
 DRAG = 2.0  # 1/s, horizontal velocity decay and the pull of vertical velocity toward rising
 MAX_AMBIENT = 14
@@ -29,10 +30,16 @@ class Bubbles:
     items: list[Bubble] = field(default_factory=list)
     cooldown: float = 0.4
 
-    def emit(self, dt: float, sources: list[tuple[float, float]], vx: float, vy: float, rng: random.Random) -> None:
-        """Trickle of bubbles from random sources, carried along by the swimmer's wake."""
+    def emit(self, dt: float, sources: Callable[[], list[tuple[float, float]]], vx: float, vy: float, rng: random.Random) -> None:
+        """Trickle of bubbles from random sources, carried along by the swimmer's wake.
+
+        The sources are only worked out when a trickle is actually due.
+        """
         self.cooldown -= dt
-        if self.cooldown > 0 or not sources or len(self.items) >= MAX_AMBIENT:
+        if self.cooldown > 0 or len(self.items) >= MAX_AMBIENT:
+            return
+        sources = sources()
+        if not sources:
             return
         self.cooldown = rng.uniform(0.25, 0.7)
         sx, sy = rng.choice(sources)

@@ -77,6 +77,7 @@ LUNGE_RANGE = 1.6  # orca lengths, centre to centre
 LUNGE_ALIGN = math.radians(20)  # the orca only lunges when it is already pointing at the salmon
 LUNGE_ROOM = 0.8  # seconds of open water the orca wants ahead of it before it lunges
 LUNGE_COOLDOWN = 0.8  # a fresh stalk, or one after a miss, closes in before it lunges
+CONTACT_REACH = 1.2  # orca lengths between centres beyond which no mouth, however it is drawn, can reach the salmon
 STALK_GIVE_UP = 14.0
 THREAT_RANGE = 3.0  # orca lengths at which a stalking orca alarms the salmon
 THREAT_RELEASE = 3.6
@@ -191,7 +192,14 @@ class World:
     # ------------------------------------------------------------------ orca
 
     def _contact(self) -> bool:
-        """The orca's mouth, where it is drawn, is within the salmon's half-length of the salmon's drawn centre."""
+        """The orca's mouth, where it is drawn, is within the salmon's half-length of the salmon's drawn centre.
+
+        Only a head that has settled bites. Mid-turn it sweeps across the screen
+        too fast to snap at anything, and counting it would make every flip a
+        free catch.
+        """
+        if self.orca.body.att.turning or self._gap() > CONTACT_REACH * self.orca_length:
+            return False
         mx, my = self._orca_placement().outline(0.0, 0.0)
         fx, fy = self._fish_placement().outline(0.5, 0.0)
         return math.hypot(fx - mx, fy - my) < 0.5 * self.fish_length
@@ -289,8 +297,7 @@ class World:
         rate = (JAW_OPEN_RATE if goal > o.jaw_open else JAW_CLOSE_RATE) * dt
         o.jaw_open += max(-rate, min(rate, goal - o.jaw_open))
 
-        place = self._orca_placement()
-        o.bubbles.emit(dt, [place.surface(u, v) for u, v in ORCA.vents], b.vx, b.vy, self.rng)
+        o.bubbles.emit(dt, lambda: self._orca_placement().surface(*zip(*ORCA.vents)).tolist(), b.vx, b.vy, self.rng)
         o.bubbles.update(dt)
 
     # ------------------------------------------------------------------ fish
