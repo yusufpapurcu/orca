@@ -87,6 +87,9 @@ class Part:
     attach: float | None = None
     # Drawn again underneath, shifted, in Species.outline_color.
     outline: bool = False
+    # Rigid appendages only: how far the height shrinks over a beat. A side
+    # view of a tail sweeping side to side sees the fin foreshorten.
+    flutter: float = 0.0
 
 
 def ellipse(cu: float, cv: float, ru: float, rv: float, deg: float, n: int = 12) -> tuple[Pt, ...]:
@@ -155,7 +158,14 @@ class BakedPart:
     color: tuple[int, int, int, int]
     attach: float | None
     outline: bool
+    flutter: float
     points: tuple[tuple[float, float], ...]
+
+
+def fin_height(flutter: float, phase: float) -> float:
+    """Height factor of a fluttering fin: two dips per beat plus a slow sway."""
+    dip = 0.5 + 0.5 * math.cos(4 * math.pi * phase)
+    return max(0.3, 1.0 - flutter * dip + 0.25 * flutter * math.sin(2 * math.pi * phase))
 
 
 @dataclass(frozen=True, eq=False)
@@ -193,7 +203,7 @@ def compile_species(sp: Species) -> Rig:
         return (*ImageColor.getrgb(sp.palette[key]), 255)
 
     parts = tuple(
-        BakedPart(rgba(p.color), p.attach, p.outline, tuple(bake(p, sp.profile)))
+        BakedPart(rgba(p.color), p.attach, p.outline, p.flutter, tuple(bake(p, sp.profile)))
         for p in sorted(sp.parts, key=lambda p: p.order)
     )
     k = sp.outline_px

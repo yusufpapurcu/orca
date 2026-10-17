@@ -175,10 +175,13 @@ class Overlay:
         if not ok:
             raise ctypes.WinError(ctypes.get_last_error())
 
-    def show(self) -> None:
-        if not self.visible:
-            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
-            self.visible = True
+    def show(self) -> bool:
+        """Show the window. True if it was hidden, so the caller can fix the z-order."""
+        if self.visible:
+            return False
+        user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+        self.visible = True
+        return True
 
     def hide(self) -> None:
         if self.visible:

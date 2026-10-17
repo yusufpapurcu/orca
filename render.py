@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageDraw
 
-from anatomy import Rig
+from anatomy import Rig, fin_height
 from bubbles import Bubbles
 from kinematics import Body, projector, view
 
@@ -64,7 +64,8 @@ def _place(rig: Rig, pose: Pose, project):
         else:
             fx, fy, tx, ty = rig.spine(part.attach, phase)
             nx, ny = -ty, tx
-            pts = [project(fx + a * tx + b * nx, fy + a * ty + b * ny) for a, b in part.points]
+            k = fin_height(part.flutter, phase) if part.flutter else 1.0
+            pts = [project(fx + a * tx + k * b * nx, fy + a * ty + k * b * ny) for a, b in part.points]
         placed.append((part, pts))
     return placed
 
@@ -120,15 +121,3 @@ def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, x: float, y: flo
         draw.polygon([(px - bx, py - by) for px, py in pts], fill=part.color)
     _draw_bubbles(draw, bubbles, ax, ay, bx, by, front=True)
     return Sprite(big.reduce(SS), ax + bx // SS, ay + by // SS)
-
-
-def make_sheet(rig: Rig, lay: Layout, frames: int = 6) -> Image.Image:
-    cols = 3
-    rows = math.ceil(frames / cols)
-    cell = lay.size
-    bg = Image.new("RGBA", (cell * cols, cell * rows), (96, 140, 176, 255))
-    for k in range(frames):
-        cx, cy = (k % cols) * cell + lay.half, (k // cols) * cell + lay.half
-        s = render(rig, Pose(k / frames, 0.0, 1.0), Bubbles(), lay, cx, cy)
-        bg.alpha_composite(s.image.convert("RGBA"), (s.x, s.y))
-    return bg
