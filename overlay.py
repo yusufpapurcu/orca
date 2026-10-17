@@ -6,6 +6,8 @@ import ctypes
 import sys
 from ctypes import wintypes
 
+import numpy as np
+
 from kinematics import Rect
 from render import Sprite
 
@@ -150,7 +152,7 @@ class Overlay:
         self.bitmap = gdi32.CreateDIBSection(self.mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
         if not self.bitmap:
             raise ctypes.WinError(ctypes.get_last_error())
-        self.pixels = memoryview((ctypes.c_ubyte * (size * size * 4)).from_address(bits.value)).cast("B")
+        self.pixels = np.ctypeslib.as_array((ctypes.c_ubyte * (size * size * 4)).from_address(bits.value)).reshape(size, size, 4)
         self.old_bitmap = gdi32.SelectObject(self.mem_dc, self.bitmap)
 
         self.blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
@@ -164,10 +166,7 @@ class Overlay:
 
     def present(self, sprite: Sprite) -> None:
         w, h = sprite.image.size
-        data = memoryview(sprite.image.tobytes("raw", "BGRa"))
-        row, stride = w * 4, self.size * 4
-        for r in range(h):
-            self.pixels[r * stride:r * stride + row] = data[r * row:(r + 1) * row]
+        self.pixels[:h, :w] = np.frombuffer(sprite.image.tobytes("raw", "BGRa"), dtype=np.uint8).reshape(h, w, 4)
         pos, size = wintypes.POINT(sprite.x, sprite.y), wintypes.SIZE(w, h)
         ok = user32.UpdateLayeredWindow(
             self.hwnd, self.screen_dc, ctypes.byref(pos), ctypes.byref(size), self.mem_dc,
@@ -212,7 +211,7 @@ class Overlay:
             gdi32.SelectObject(self.mem_dc, self.old_bitmap)
             self.old_bitmap = None
         if self.bitmap:
-            self.pixels.release()
+            self.pixels = None
             gdi32.DeleteObject(self.bitmap)
             self.bitmap = None
         if self.mem_dc:

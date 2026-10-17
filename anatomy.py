@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from functools import cache, cached_property
 from typing import NamedTuple
 
+import numpy as np
 from PIL import ImageColor
 
 
@@ -145,12 +146,29 @@ BLADE_STEPS = 4
 BLADE_TIP = 0.4  # width at the tip, as a share of the root's
 
 
-def blades(part: Part) -> tuple[Blade, ...]:
-    """Front view of a rigid appendage: a centre line from its root to its tip, widening toward the root."""
-    if part.attach is None or not part.girth:
-        return ()
-    out = []
-    for side in (-1, 1):
+@dataclass(frozen=True, eq=False)
+class Fin:
+    """A rigid appendage as the pose code needs it, in its own (along, perpendicular) frame.
+
+    `ab` holds the side silhouette followed by the end-on blades, `hw` each row's
+    half width across the blade (zero on the silhouette) and `spans` where each
+    shape starts and stops. Seen end-on a fin is not a hairline but a blade
+    `girth` thick at the root, so a blade is a centre line from root to tip with
+    a width on either side.
+    """
+
+    ab: np.ndarray
+    hw: np.ndarray
+    spans: tuple[tuple[int, int], ...]
+    base: float  # smallest perpendicular offset: where the root meets the body
+
+
+def fin_of(part: Part, silhouette: np.ndarray) -> Fin | None:
+    if part.attach is None:
+        return None
+    rows, hws, spans = [silhouette], [np.zeros(len(silhouette))], [(0, len(silhouette))]
+    n = len(silhouette)
+    for side in (-1, 1) if part.girth else ():
         pts = [(p.u, p.v) for p in part.points if p.v * side > 0]
         if not pts:
             continue
@@ -158,13 +176,17 @@ def blades(part: Part) -> tuple[Blade, ...]:
         root = [a for a, b in pts if abs(b) < near + 0.02]
         a0, b0 = sum(root) / len(root), near * side
         a1, b1 = max(pts, key=lambda p: abs(p[1]))
-        out.append(tuple(
-            (a0 + (a1 - a0) * t, b0 + (b1 - b0) * t, 0.5 * part.girth * (1 - (1 - BLADE_TIP) * t))
-            for t in (i / BLADE_STEPS for i in range(BLADE_STEPS + 1))))
-    return tuple(out)
+        ts = np.linspace(0.0, 1.0, BLADE_STEPS + 1)
+        centre = np.stack([a0 + (a1 - a0) * ts, b0 + (b1 - b0) * ts], axis=1)
+        half = 0.5 * part.girth * (1 - (1 - BLADE_TIP) * ts)
+        rows += [centre, centre[::-1]]
+        hws += [half, -half[::-1]]
+        spans.append((n, n + 2 * len(ts)))
+        n += 2 * len(ts)
+    return Fin(np.concatenate(rows), np.concatenate(hws), tuple(spans), float(silhouette[:, 1].min()))
 
 
-def bake(part: Part, profile: Profile) -> list[tuple[float, float]]:
+def bake(part: Part, profile: Profile) -> np.ndarray:
     """Resample a part densely so it bends smoothly under the spine wave."""
     pts = part.points
     n = len(pts)
@@ -193,13 +215,10 @@ def bake(part: Part, profile: Profile) -> list[tuple[float, float]]:
                 h00 * u0 + h10 * m0[0] + h01 * u1 + h11 * m1[0],
                 h00 * v0 + h10 * m0[1] + h01 * v1 + h11 * m1[1],
             ))
-    return out
+    return np.array(out)
 
 
-Blade = tuple[tuple[float, float, float], ...]  # (along, perpendicular, half width), root to tip
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class BakedPart:
     name: str
     color: tuple[int, int, int, int]
@@ -207,8 +226,8 @@ class BakedPart:
     outline: bool
     flutter: float
     paired: bool
-    blades: tuple[Blade, ...]  # the part seen end-on, one blade per side of the spine
-    points: tuple[tuple[float, float], ...]
+    fin: Fin | None  # set for a rigid appendage
+    points: np.ndarray  # (n, 2) rows of (u, v), or of (along, perpendicular) for an appendage
 
 
 def fin_height(flutter: float, phase: float) -> float:
@@ -226,9 +245,10 @@ class BakedJaw:
     mouth: tuple[int, int, int, int]
     chin: tuple[int, int, int, int]
     tooth: tuple[int, int, int, int]
-    lower: tuple[tuple[float, float], ...]  # the lower jaw outline, closed
-    upper_teeth: tuple[Triangle, ...]
-    lower_teeth: tuple[Triangle, ...]  # in the closed jaw's frame, so they rotate with it
+    lip: np.ndarray  # (n, 2) the mouth line, nose end first, hinge last
+    lower: np.ndarray  # (n, 2) the lower jaw outline: the lip, then the underside from the hinge to the chin
+    upper_teeth: np.ndarray  # (teeth, 3, 2) triangles, base then tip
+    lower_teeth: np.ndarray  # in the closed jaw's frame, so they rotate with it
     parts_below: int  # how many parts are drawn before the jaw
 
 
@@ -242,25 +262,26 @@ class Rig:
     species: Species
     parts: tuple[BakedPart, ...]
     outline_color: tuple[int, int, int, int]
-    outline_offsets: tuple[tuple[int, int], ...]
     reach: float  # radius, in body lengths, around the centre that holds the animal at any pose
+    fixed: np.ndarray  # (n, 2) every point of the parts that bend with the spine, in draw order
+    fixed_spans: tuple[tuple[int, int, int], ...]  # (part index, start, stop) rows of `fixed`
     jaw: BakedJaw | None = None
 
-    def spine(self, u: float, phase: float) -> tuple[float, float, float, float]:
+    def spine(self, u, phase: float):
         """Spine point and unit tangent at u. Phase is in tail-beat cycles.
 
         The wave displaces y, growing from almost nothing at the head to the tail.
         """
         sp = self.species
         th = 2 * math.pi * (sp.wave_cycles * u - phase)
-        s, c = math.sin(th), math.cos(th)
+        s, c = np.sin(th), np.cos(th)
         env = u * u
         y = sp.wave_amp * env * s
         slope = sp.wave_amp * (2 * u * s + env * 2 * math.pi * sp.wave_cycles * c)
-        inv = 1.0 / math.sqrt(1.0 + slope * slope)
+        inv = 1.0 / np.sqrt(1.0 + slope * slope)
         return u, y, inv, slope * inv
 
-    def bend(self, u: float, v: float, phase: float) -> tuple[float, float]:
+    def bend(self, u, v, phase: float):
         x, y, tx, ty = self.spine(u, phase)
         return x - v * ty, y + v * tx
 
@@ -270,13 +291,21 @@ def compile_species(sp: Species) -> Rig:
     def rgba(key: str) -> tuple[int, int, int, int]:
         return (*ImageColor.getrgb(sp.palette[key]), 255)
 
+    ordered = sorted(sp.parts, key=lambda p: p.order)
+    pts = [bake(p, sp.profile) for p in ordered]
     parts = tuple(
-        BakedPart(p.name, rgba(p.color), p.attach, p.outline, p.flutter, p.paired, blades(p), tuple(bake(p, sp.profile)))
-        for p in sorted(sp.parts, key=lambda p: p.order)
+        BakedPart(p.name, rgba(p.color), p.attach, p.outline, p.flutter, p.paired, fin_of(p, xy), xy)
+        for p, xy in zip(ordered, pts)
     )
-    k = sp.outline_px
-    rig = Rig(sp, parts, (*ImageColor.getrgb(sp.outline_color), 255), ((k, 0), (-k, 0), (0, k), (0, -k)), 0.0,
-              _bake_jaw(sp, rgba) if sp.jaw else None)
+    spans, rows, n = [], [], 0
+    for i, part in enumerate(parts):
+        if part.attach is None:
+            spans.append((i, n, n + len(part.points)))
+            rows.append(part.points)
+            n += len(part.points)
+    assert parts[spans[0][0]].name == "body", "the body is the first part that bends with the spine"
+    rig = Rig(sp, parts, (*ImageColor.getrgb(sp.outline_color), 255), 0.0,
+              np.concatenate(rows), tuple(spans), _bake_jaw(sp, rgba) if sp.jaw else None)
     object.__setattr__(rig, "reach", _reach(rig))
     return rig
 
@@ -299,25 +328,27 @@ def _bake_jaw(sp: Species, rgba) -> BakedJaw:
             d -= n
         return jaw.lip[-1]
 
-    def teeth(dv: float) -> tuple[Triangle, ...]:
+    def teeth(dv: float) -> np.ndarray:
         out = []
         for k in range(jaw.teeth):
             u, v = on_lip(0.14 + 0.72 * k / max(1, jaw.teeth - 1))
             out.append(((u - TOOTH_W, v), (u + TOOTH_W, v), (u, v + dv)))
-        return tuple(out)
+        return np.array(out)
 
     below = sum(1 for p in sp.parts if p.order <= jaw.order)
-    return BakedJaw(jaw, rgba(jaw.mouth), rgba(jaw.chin), rgba(jaw.tooth), lower, teeth(TOOTH_H), teeth(-TOOTH_H), below)
+    return BakedJaw(jaw, rgba(jaw.mouth), rgba(jaw.chin), rgba(jaw.tooth), np.array(jaw.lip), np.array(lower),
+                    teeth(TOOTH_H), teeth(-TOOTH_H), below)
 
 
 def _reach(rig: Rig) -> float:
     far = 0.0
     for phase in (i / 8 for i in range(8)):
         for part in rig.parts:
+            u, v = part.points[:, 0], part.points[:, 1]
             if part.attach is None:
-                pts = [rig.bend(u, v, phase) for u, v in part.points]
+                x, y = rig.bend(u, v, phase)
             else:
                 fx, fy, tx, ty = rig.spine(part.attach, phase)
-                pts = [(fx + a * tx - b * ty, fy + a * ty + b * tx) for a, b in part.points]
-            far = max(far, max(math.hypot(0.5 - x, y) for x, y in pts))
+                x, y = fx + u * tx - v * ty, fy + u * ty + v * tx
+            far = max(far, float(np.hypot(0.5 - x, y).max()))
     return far
