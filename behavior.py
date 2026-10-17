@@ -18,7 +18,8 @@ from enum import Enum, auto
 
 from anatomy import compile_species
 from bubbles import Bubbles
-from kinematics import STEER_GAIN, Body, Rect, accelerate, advance, avoid_edges, nose, projector, steer, view, wrap
+from kinematics import STEER_GAIN, Body, Rect, accelerate, advance, avoid_edges, steer, wrap
+from projection import Placement, Pose
 from species import ORCA, SALMON
 
 REF_LENGTH = 310.0  # px; speeds and accelerations below are written for an orca this long
@@ -94,6 +95,13 @@ class Orca:
     wander: float = 0.0  # heading bias drifting as a slow random process
     jaw_open: float = 0.0
 
+    def pose(self) -> Pose:
+        """The pose to draw. In a chomp the head shakes as the jaw snaps shut."""
+        shake = 0.0
+        if self.mode is OrcaMode.CHOMP:
+            shake = 0.3 * math.exp(-3.5 * self.age) * math.sin(2 * math.pi * 5 * self.age)
+        return self.body.pose(shake, self.jaw_open)
+
 
 @dataclass
 class Fish:
@@ -106,6 +114,9 @@ class Fish:
     dodge: float = 0.0  # heading offset while fleeing, re-rolled every fraction of a second
     dodge_left: float = 0.0
 
+    def pose(self) -> Pose:
+        return self.body.pose()
+
 
 @dataclass(frozen=True)
 class Transition:
@@ -116,13 +127,6 @@ class Transition:
 
     def __str__(self) -> str:
         return f"[{self.t:7.2f}s] {self.actor} {self.old.name if self.old else 'start'} -> {self.new.name}"
-
-
-def head_shake(o: Orca) -> float:
-    """Extra pitch in radians: the orca shakes its head as the jaw snaps shut."""
-    if o.mode is not OrcaMode.CHOMP:
-        return 0.0
-    return 0.3 * math.exp(-3.5 * o.age) * math.sin(2 * math.pi * 5 * o.age)
 
 
 class World:
@@ -138,7 +142,7 @@ class World:
         self._events: list[Transition] = []
 
         heading = rng.uniform(-math.pi, math.pi)
-        body = Body(*self._center(), heading, 0.0, facing=1 if math.cos(heading) >= 0 else -1)
+        body = Body.launch(*self._center(), heading)
         self.orca = Orca(body, OrcaMode.CRUISE, Bubbles())
         self._begin_orca_mode(OrcaMode.CRUISE)
         self.fish: Fish | None = None
@@ -152,11 +156,14 @@ class World:
         events, self._events = self._events, []
         return events
 
-    def anchor(self, body: Body, length: float, u: float, v: float) -> tuple[float, float]:
-        """Screen position of body-space point (u, v) on the orca."""
-        xscale, pitch = view(body)
-        project = projector((body.x, body.y), length, xscale, pitch)
-        return project(*self.orca_rig.bend(u, v, body.phase))
+    def _orca_placement(self) -> Placement:
+        """The orca as drawn this frame, so what it touches and emits from matches what is seen."""
+        o = self.orca
+        return Placement(self.orca_rig, o.pose(), self.orca_length, (o.body.x, o.body.y))
+
+    def _fish_placement(self) -> Placement:
+        f = self.fish
+        return Placement(self.fish_rig, f.pose(), self.fish_length, (f.body.x, f.body.y))
 
     def _center(self) -> tuple[float, float]:
         a = self.area
@@ -184,10 +191,10 @@ class World:
     # ------------------------------------------------------------------ orca
 
     def _contact(self) -> bool:
-        """The orca's mouth is within the salmon's half-length of its centre."""
-        mx, my = nose(self.orca.body, self.orca_length)
-        fb = self.fish.body
-        return math.hypot(fb.x - mx, fb.y - my) < 0.5 * self.fish_length
+        """The orca's mouth, where it is drawn, is within the salmon's half-length of the salmon's drawn centre."""
+        mx, my = self._orca_placement().outline(0.0, 0.0)
+        fx, fy = self._fish_placement().outline(0.5, 0.0)
+        return math.hypot(fx - mx, fy - my) < 0.5 * self.fish_length
 
     def _orca_next(self, o: Orca) -> OrcaMode:
         f = self.fish
@@ -219,7 +226,7 @@ class World:
     def _aligned(self, o: Orca) -> bool:
         fb = self.fish.body
         bearing = math.atan2(fb.y - o.body.y, fb.x - o.body.x)
-        return abs(wrap(bearing - o.body.heading)) < LUNGE_ALIGN
+        return abs(wrap(bearing - o.body.heading)) < LUNGE_ALIGN and not o.body.att.turning
 
     def _room_ahead(self, o: Orca, seconds: float = LUNGE_ROOM) -> bool:
         """Whether a lunge's straight path stays inside the work area, with a little slack."""
@@ -250,9 +257,8 @@ class World:
         o, f = self.orca, self.fish
         self._emit("salmon", f.mode, FishMode.CAUGHT)
         self.fish = None
-        b = o.body
-        mx, my = nose(b, self.orca_length)
-        o.bubbles.burst(mx, my, math.cos(b.heading) * b.speed, math.sin(b.heading) * b.speed, self.rng)
+        mx, my = self._orca_placement().outline(0.0, 0.0)
+        o.bubbles.burst(mx, my, o.body.vx, o.body.vy, self.rng)
 
     def _aim(self, lead: float) -> float:
         """Heading toward where the salmon will be if it keeps going, `lead` scaling how far ahead."""
@@ -283,8 +289,8 @@ class World:
         rate = (JAW_OPEN_RATE if goal > o.jaw_open else JAW_CLOSE_RATE) * dt
         o.jaw_open += max(-rate, min(rate, goal - o.jaw_open))
 
-        vents = [self.anchor(b, self.orca_length, u, v) for u, v in ORCA.vents]
-        o.bubbles.emit(dt, vents, math.cos(b.heading) * b.speed, math.sin(b.heading) * b.speed, self.rng)
+        place = self._orca_placement()
+        o.bubbles.emit(dt, [place.surface(u, v) for u, v in ORCA.vents], b.vx, b.vy, self.rng)
         o.bubbles.update(dt)
 
     # ------------------------------------------------------------------ fish
@@ -306,7 +312,7 @@ class World:
         x, y = max((candidate() for _ in range(4)), key=lambda p: math.hypot(p[0] - ob.x, p[1] - ob.y))
         goal = (rng.uniform(inner.left, inner.right), rng.uniform(inner.top, inner.bottom))
         heading = math.atan2(goal[1] - y, goal[0] - x)
-        body = Body(x, y, heading, 0.0, facing=1 if math.cos(heading) >= 0 else -1)
+        body = Body.launch(x, y, heading)
         self.fish = Fish(body, FishMode.ENTER, goal)
         self._begin_fish_mode(FishMode.ENTER)
         self._emit("salmon", None, FishMode.ENTER)
@@ -314,7 +320,7 @@ class World:
     def _fish_inner(self) -> Rect:
         """Where a wandering salmon lives; ENTER swims to a point in here and ends on reaching it."""
         gait = FISH_GAITS[FishMode.WANDER]
-        return self.area.inset(self._margin(Body(0, 0, 0, 0), gait.speed[1] * self.unit, gait))
+        return self.area.inset(self._margin(Body(0, 0, 0), gait.speed[1] * self.unit, gait))
 
     def _begin_fish_mode(self, mode: FishMode) -> None:
         f = self.fish

@@ -11,12 +11,13 @@ import argparse
 import random
 import time
 
-from behavior import World, head_shake, orca_length
+from behavior import World, orca_length
 from bubbles import Bubbles
 from film import make_film, make_sheet
 from overlay import Overlay, primary_work_area, user32, winmm
-from render import Layout, Sprite, pose_of, render
+from render import Layout, Sprite, render
 from sim import simulate
+from turns import make_turn_gif, make_turn_sheet
 
 FRAME_TIME = 1 / 60
 
@@ -33,6 +34,8 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
     fish_win = Overlay(fish_lay.size, "Salmon")
     render_ms: list[float] = []
     total_ms: list[float] = []
+    turning_ms: list[float] = []
+    calm_ms: list[float] = []
     last: Sprite | None = None
     try:
         orca_win.show()
@@ -49,10 +52,10 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
                 print(event, flush=True)
 
             o, f = world.orca, world.fish
-            sprite = render(world.orca_rig, pose_of(o.body, head_shake(o), o.jaw_open), o.bubbles, orca_lay, o.body.x, o.body.y)
+            sprite = render(world.orca_rig, o.pose(), o.bubbles, orca_lay, o.body.x, o.body.y)
             fish_sprite = None
             if f:
-                fish_sprite = render(world.fish_rig, pose_of(f.body), Bubbles(), fish_lay, f.body.x, f.body.y)
+                fish_sprite = render(world.fish_rig, f.pose(), Bubbles(), fish_lay, f.body.x, f.body.y)
             t1 = time.perf_counter()
             orca_win.present(sprite)
             if fish_sprite:
@@ -64,6 +67,7 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
             t2 = time.perf_counter()
             render_ms.append((t1 - t0) * 1000)
             total_ms.append((t2 - t0) * 1000)
+            (turning_ms if o.body.att.turning or (f and f.body.att.turning) else calm_ms).append((t2 - t0) * 1000)
             last = sprite
             n += 1
 
@@ -90,6 +94,9 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
         print(f"frames={len(total_ms)} orca={orca_lay.length}px salmon={fish_lay.length}px "
               f"render avg={sum(render_ms) / len(render_ms):.2f}ms "
               f"render+present avg={sum(total_ms) / len(total_ms):.2f}ms max={max(total_ms):.2f}ms")
+    for name, ms in (("turning", turning_ms), ("calm", calm_ms)):
+        if ms:
+            print(f"  {name}: frames={len(ms)} render+present avg={sum(ms) / len(ms):.2f}ms max={max(ms):.2f}ms")
     if snapshot and last is not None:
         last.image.convert("RGBA").save(snapshot)
         print(f"snapshot saved to {snapshot}")
@@ -102,6 +109,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, help="seed the random number generator")
     ap.add_argument("--sheet", help="render the tail beats and the jaw to this PNG and exit (no window)")
     ap.add_argument("--film", help="render a contact sheet of one hunt to this PNG and exit (no window)")
+    ap.add_argument("--turns", help="render 12 frames across a turn toward and away from the viewer, for both animals, to this PNG and exit")
+    ap.add_argument("--turn-gif", metavar="PREFIX", help="write PREFIX-orca.gif and PREFIX-salmon.gif of a few turns at true speed and exit")
     ap.add_argument("--sim", type=float, metavar="SECONDS",
                     help="run the simulation headless, print every transition and a summary, and exit")
     args = ap.parse_args()
@@ -111,6 +120,15 @@ def main() -> None:
     if args.film:
         make_film(args.seed if args.seed is not None else 0).save(args.film)
         print(f"film saved to {args.film}")
+        return
+    if args.turns:
+        make_turn_sheet().save(args.turns)
+        print(f"turns saved to {args.turns}")
+        return
+    if args.turn_gif:
+        for kind in ("orca", "salmon"):
+            make_turn_gif(kind, f"{args.turn_gif}-{kind}.gif")
+            print(f"saved {args.turn_gif}-{kind}.gif")
         return
     if args.sheet:
         make_sheet().save(args.sheet)

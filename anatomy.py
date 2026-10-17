@@ -90,6 +90,11 @@ class Part:
     # Rigid appendages only: how far the height shrinks over a beat. A side
     # view of a tail sweeping side to side sees the fin foreshorten.
     flutter: float = 0.0
+    # Rigid appendages only: a flipper-like part that comes as a left and right pair.
+    paired: bool = False
+    # Rigid appendages only: thickness at the root, in body lengths. Seen end-on a
+    # fin is not a hairline but a blade this wide, tapering toward the tip.
+    girth: float = 0.0
 
 
 def ellipse(cu: float, cv: float, ru: float, rv: float, deg: float, n: int = 12) -> tuple[Pt, ...]:
@@ -136,6 +141,29 @@ class Species:
 MAX_STEP = 0.012
 
 
+BLADE_STEPS = 4
+BLADE_TIP = 0.4  # width at the tip, as a share of the root's
+
+
+def blades(part: Part) -> tuple[Blade, ...]:
+    """Front view of a rigid appendage: a centre line from its root to its tip, widening toward the root."""
+    if part.attach is None or not part.girth:
+        return ()
+    out = []
+    for side in (-1, 1):
+        pts = [(p.u, p.v) for p in part.points if p.v * side > 0]
+        if not pts:
+            continue
+        near = min(abs(b) for _, b in pts)
+        root = [a for a, b in pts if abs(b) < near + 0.02]
+        a0, b0 = sum(root) / len(root), near * side
+        a1, b1 = max(pts, key=lambda p: abs(p[1]))
+        out.append(tuple(
+            (a0 + (a1 - a0) * t, b0 + (b1 - b0) * t, 0.5 * part.girth * (1 - (1 - BLADE_TIP) * t))
+            for t in (i / BLADE_STEPS for i in range(BLADE_STEPS + 1))))
+    return tuple(out)
+
+
 def bake(part: Part, profile: Profile) -> list[tuple[float, float]]:
     """Resample a part densely so it bends smoothly under the spine wave."""
     pts = part.points
@@ -168,12 +196,18 @@ def bake(part: Part, profile: Profile) -> list[tuple[float, float]]:
     return out
 
 
+Blade = tuple[tuple[float, float, float], ...]  # (along, perpendicular, half width), root to tip
+
+
 @dataclass(frozen=True)
 class BakedPart:
+    name: str
     color: tuple[int, int, int, int]
     attach: float | None
     outline: bool
     flutter: float
+    paired: bool
+    blades: tuple[Blade, ...]  # the part seen end-on, one blade per side of the spine
     points: tuple[tuple[float, float], ...]
 
 
@@ -237,7 +271,7 @@ def compile_species(sp: Species) -> Rig:
         return (*ImageColor.getrgb(sp.palette[key]), 255)
 
     parts = tuple(
-        BakedPart(rgba(p.color), p.attach, p.outline, p.flutter, tuple(bake(p, sp.profile)))
+        BakedPart(p.name, rgba(p.color), p.attach, p.outline, p.flutter, p.paired, blades(p), tuple(bake(p, sp.profile)))
         for p in sorted(sp.parts, key=lambda p: p.order)
     )
     k = sp.outline_px

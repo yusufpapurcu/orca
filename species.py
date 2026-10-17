@@ -50,7 +50,7 @@ ORCA = Species(
             Pt(0.066, 0.080),
             Pt(0.020, 0.038),
             Pt(-0.030, 0.026, True),
-        ), attach=1.0, outline=True),
+        ), attach=1.0, outline=True, girth=0.034),
         Part("body", "black", 1, (
             Pt(0.0, Rim(-1), True),
             Pt(1.0, Rim(-1), True),
@@ -93,7 +93,7 @@ ORCA = Species(
             Pt(0.092, 0.150),
             Pt(0.076, 0.100),
             Pt(0.070, 0.034, True),
-        ), attach=0.27, outline=True),
+        ), attach=0.27, outline=True, paired=True, girth=0.075),
         Part("dorsal_fin", "black", 5, (
             Pt(-0.085, -0.070, True),
             Pt(-0.062, -0.128),
@@ -104,7 +104,7 @@ ORCA = Species(
             Pt(0.060, -0.160),
             Pt(0.078, -0.105),
             Pt(0.092, -0.070, True),
-        ), attach=0.40, outline=True),
+        ), attach=0.40, outline=True, girth=0.05),
         Part("eye_ring", "eye_ring", 6, ellipse(EYE_U, EYE_V, 0.0125, 0.0125, 0, 10)),
         Part("eye", "eye", 7, ellipse(EYE_U, EYE_V, 0.0075, 0.0075, 0, 10)),
     ),
@@ -190,7 +190,7 @@ SALMON = Species(
             Pt(0.090, 0.105),
             Pt(0.030, 0.050),
             Pt(-0.025, 0.030, True),
-        ), attach=1.0, outline=True, flutter=0.35),
+        ), attach=1.0, outline=True, flutter=0.35, girth=0.03),
         Part("body", "back", 1, (
             Pt(0.0, Rim(-1), True),
             Pt(1.0, Rim(-1), True),
@@ -215,20 +215,20 @@ SALMON = Species(
         Part("pectoral", "fin_pale", 4, (
             Pt(-0.015, 0.070, True), Pt(-0.005, 0.125), Pt(0.030, 0.155), Pt(0.065, 0.165),
             Pt(0.045, 0.130), Pt(0.035, 0.080, True),
-        ), attach=0.20, outline=True),
+        ), attach=0.20, outline=True, paired=True, girth=0.026),
         Part("pelvic", "fin_pale", 4, (
             Pt(-0.020, 0.090, True), Pt(0.000, 0.130), Pt(0.035, 0.145), Pt(0.040, 0.100, True),
-        ), attach=0.52, outline=True),
+        ), attach=0.52, outline=True, paired=True, girth=0.022),
         Part("anal", "fin_pale", 4, (
             Pt(-0.030, 0.055, True), Pt(0.000, 0.100), Pt(0.035, 0.095), Pt(0.045, 0.050, True),
-        ), attach=0.74, outline=True),
+        ), attach=0.74, outline=True, girth=0.02),
         Part("dorsal_fin", "fin", 4, (
             Pt(-0.040, -0.090, True), Pt(-0.015, -0.165), Pt(0.010, -0.160), Pt(0.045, -0.120),
             Pt(0.065, -0.090, True),
-        ), attach=0.44, outline=True),
+        ), attach=0.44, outline=True, girth=0.022),
         Part("adipose", "fin", 4, (
             Pt(-0.020, -0.045, True), Pt(0.000, -0.080), Pt(0.025, -0.045, True),
-        ), attach=0.80, outline=True),
+        ), attach=0.80, outline=True, girth=0.01),
         Part("eye", "iris", 6, ellipse(0.062, -0.012, 0.019, 0.019, 0, 10)),
         Part("pupil", "pupil", 7, ellipse(0.064, -0.012, 0.0115, 0.0115, 0, 8)),
     ),

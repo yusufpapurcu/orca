@@ -7,9 +7,10 @@ import math
 from PIL import Image, ImageDraw, ImageFont
 
 from anatomy import Rig, compile_species
-from behavior import OrcaMode, World, head_shake
+from behavior import OrcaMode, World
 from bubbles import Bubbles
-from render import Layout, Pose, Sprite, pose_of, render
+from projection import Pose
+from render import Layout, Sprite, render
 from sim import DT, new_world
 from species import ORCA, SALMON
 
@@ -40,8 +41,8 @@ def stack(parts: list[Image.Image]) -> Image.Image:
 def make_sheet() -> Image.Image:
     """The orca's tail beat and jaw at 0, 0.5 and 1, and the salmon's tail beat, enlarged to be readable."""
     orca, salmon = compile_species(ORCA), compile_species(SALMON)
-    beat = [Pose(k / 6, 0.0, 1.0) for k in range(6)]
-    jaw = [Pose(0.1, 0.0, 1.0, j) for j in (0.0, 0.5, 1.0)]
+    beat = [Pose.side(k / 6) for k in range(6)]
+    jaw = [Pose.side(0.1, j) for j in (0.0, 0.5, 1.0)]
     return stack([
         grid(orca, Layout.for_rig(orca, 320), beat, 3),
         grid(orca, Layout.for_rig(orca, 600), jaw, 3),
@@ -60,8 +61,8 @@ def snapshot(world: World, lays: tuple[Layout, Layout]) -> Image.Image:
     canvas = Image.new("RGBA", (round(a.right - a.left), round(a.bottom - a.top)), FILM_BG)
     f, o = world.fish, world.orca
     if f:
-        _blit(canvas, render(world.fish_rig, pose_of(f.body), Bubbles(), lays[1], f.body.x - a.left, f.body.y - a.top))
-    _blit(canvas, render(world.orca_rig, pose_of(o.body, head_shake(o), o.jaw_open), o.bubbles, lays[0],
+        _blit(canvas, render(world.fish_rig, f.pose(), Bubbles(), lays[1], f.body.x - a.left, f.body.y - a.top))
+    _blit(canvas, render(world.orca_rig, o.pose(), o.bubbles, lays[0],
                          o.body.x - a.left, o.body.y - a.top))
     return canvas
 
