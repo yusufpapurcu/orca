@@ -11,17 +11,14 @@ import argparse
 import random
 import time
 
-from behavior import World
+from behavior import World, head_shake, orca_length
 from bubbles import Bubbles
-from film import make_sheet
+from film import make_film, make_sheet
 from overlay import Overlay, primary_work_area, user32, winmm
 from render import Layout, Sprite, pose_of, render
+from sim import simulate
 
 FRAME_TIME = 1 / 60
-
-
-def orca_length(screen_h: int) -> int:
-    return max(200, min(520, round(screen_h * 0.296)))
 
 
 def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
@@ -52,7 +49,7 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
                 print(event, flush=True)
 
             o, f = world.orca, world.fish
-            sprite = render(world.orca_rig, pose_of(o.body), o.bubbles, orca_lay, o.body.x, o.body.y)
+            sprite = render(world.orca_rig, pose_of(o.body, head_shake(o), o.jaw_open), o.bubbles, orca_lay, o.body.x, o.body.y)
             fish_sprite = None
             if f:
                 fish_sprite = render(world.fish_rig, pose_of(f.body), Bubbles(), fish_lay, f.body.x, f.body.y)
@@ -103,8 +100,18 @@ def main() -> None:
     ap.add_argument("--frames", type=int, help="run N frames then exit and print frame times")
     ap.add_argument("--snapshot", help="after the run, save the last rendered orca frame (RGBA) to this PNG")
     ap.add_argument("--seed", type=int, help="seed the random number generator")
-    ap.add_argument("--sheet", help="render the orca and salmon tail beats to this PNG and exit (no window)")
+    ap.add_argument("--sheet", help="render the tail beats and the jaw to this PNG and exit (no window)")
+    ap.add_argument("--film", help="render a contact sheet of one hunt to this PNG and exit (no window)")
+    ap.add_argument("--sim", type=float, metavar="SECONDS",
+                    help="run the simulation headless, print every transition and a summary, and exit")
     args = ap.parse_args()
+    if args.sim:
+        print(simulate(args.sim, args.seed if args.seed is not None else 0))
+        return
+    if args.film:
+        make_film(args.seed if args.seed is not None else 0).save(args.film)
+        print(f"film saved to {args.film}")
+        return
     if args.sheet:
         make_sheet().save(args.sheet)
         print(f"sheet saved to {args.sheet}")

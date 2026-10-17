@@ -1,7 +1,12 @@
-"""The simulation: actors as explicit state machines, steered in free 2D.
+"""The simulation: two actors as explicit state machines, steered in free 2D.
 
 World is pure. It owns the actors and the rng and never touches rendering or
 Win32, so it runs headless and deterministically for a given seed.
+
+Orca:   CRUISE -> STALK -> LUNGE -> CHOMP -> SATED -> CRUISE (a new salmon spawns)
+                    ^        |
+                    +--miss--+
+Salmon: ENTER -> WANDER <-> FLEE, then CAUGHT when the orca's mouth reaches it.
 """
 
 from __future__ import annotations
@@ -13,19 +18,29 @@ from enum import Enum, auto
 
 from anatomy import compile_species
 from bubbles import Bubbles
-from kinematics import Body, Rect, accelerate, advance, avoid_edges, projector, steer, view
+from kinematics import STEER_GAIN, Body, Rect, accelerate, advance, avoid_edges, nose, projector, steer, view, wrap
 from species import ORCA, SALMON
 
-REF_LENGTH = 310.0  # px; the speeds below are written for an orca this long
+REF_LENGTH = 310.0  # px; speeds and accelerations below are written for an orca this long
+
+
+def orca_length(screen_h: int) -> int:
+    return max(200, min(520, round(screen_h * 0.296)))
 
 
 class OrcaMode(Enum):
     CRUISE = auto()
+    STALK = auto()
+    LUNGE = auto()
+    CHOMP = auto()
+    SATED = auto()
 
 
 class FishMode(Enum):
     ENTER = auto()  # swimming in from off-screen
     WANDER = auto()
+    FLEE = auto()
+    CAUGHT = auto()
 
 
 @dataclass(frozen=True)
@@ -37,16 +52,35 @@ class Gait:
 
 ORCA_GAITS = {
     OrcaMode.CRUISE: Gait((120, 160), 120, 1.3),
+    OrcaMode.STALK: Gait((200, 240), 220, 1.8),
+    OrcaMode.LUNGE: Gait((520, 520), 1500, 4.5),
+    OrcaMode.CHOMP: Gait((30, 60), 900, 1.5),
+    OrcaMode.SATED: Gait((70, 100), 150, 1.3),
 }
 
 FISH_GAITS = {
     FishMode.ENTER: Gait((150, 150), 300, 1.5),
     FishMode.WANDER: Gait((80, 100), 150, 1.4),
+    FishMode.FLEE: Gait((110, 300), 250, 3.0),  # speed rises with the orca's proximity
 }
 
 # Speed in px/s at REF_LENGTH at which the tail beats at species.beat_hz.
 ORCA_BEAT_SPEED = 140.0
 FISH_BEAT_SPEED = 90.0
+
+CRUISE_SECONDS = (3.0, 6.0)  # before the orca notices a salmon
+SATED_SECONDS = (2.6, 3.4)
+CHOMP_SECONDS = 1.2
+LUNGE_SECONDS = 1.2
+LUNGE_RANGE = 1.6  # orca lengths, centre to centre
+LUNGE_ALIGN = math.radians(20)  # the orca only lunges when it is already pointing at the salmon
+LUNGE_ROOM = 0.8  # seconds of open water the orca wants ahead of it before it lunges
+LUNGE_COOLDOWN = 0.8  # a fresh stalk, or one after a miss, closes in before it lunges
+STALK_GIVE_UP = 14.0
+THREAT_RANGE = 3.0  # orca lengths at which a stalking orca alarms the salmon
+THREAT_RELEASE = 3.6
+FLEE_REACTION = 0.4  # seconds before a startled salmon actually bolts
+JAW_OPEN_RATE, JAW_CLOSE_RATE = 7.0, 16.0  # per second; the chomp snaps shut
 
 
 @dataclass
@@ -55,8 +89,10 @@ class Orca:
     mode: OrcaMode
     bubbles: Bubbles
     age: float = 0.0  # seconds in this mode
+    dwell: float = 0.0  # how long CRUISE or SATED lasts
     speed_goal: float = 0.0
     wander: float = 0.0  # heading bias drifting as a slow random process
+    jaw_open: float = 0.0
 
 
 @dataclass
@@ -67,6 +103,8 @@ class Fish:
     age: float = 0.0
     speed_goal: float = 0.0
     wander: float = 0.0
+    dodge: float = 0.0  # heading offset while fleeing, re-rolled every fraction of a second
+    dodge_left: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -80,12 +118,19 @@ class Transition:
         return f"[{self.t:7.2f}s] {self.actor} {self.old.name if self.old else 'start'} -> {self.new.name}"
 
 
+def head_shake(o: Orca) -> float:
+    """Extra pitch in radians: the orca shakes its head as the jaw snaps shut."""
+    if o.mode is not OrcaMode.CHOMP:
+        return 0.0
+    return 0.3 * math.exp(-3.5 * o.age) * math.sin(2 * math.pi * 5 * o.age)
+
+
 class World:
-    def __init__(self, area: Rect, orca_length: float, rng: random.Random):
+    def __init__(self, area: Rect, length: float, rng: random.Random):
         self.area = area
-        self.orca_length = orca_length
-        self.fish_length = orca_length * SALMON.length_frac
-        self.unit = orca_length / REF_LENGTH
+        self.orca_length = length
+        self.fish_length = length * SALMON.length_frac
+        self.unit = length / REF_LENGTH
         self.rng = rng
         self.t = 0.0
         self.orca_rig = compile_species(ORCA)
@@ -121,8 +166,9 @@ class World:
         self._events.append(Transition(self.t, actor, old, new))
 
     def _margin(self, body: Body, speed_goal: float, gait: Gait) -> float:
-        """Distance from an edge at which to start turning away: the turning radius plus slack."""
-        return 0.15 * self.orca_length + 1.15 * max(body.speed, speed_goal) / gait.turn
+        """Distance from an edge at which to start turning away: the turning radius plus the steering lag."""
+        speed = max(body.speed, speed_goal)
+        return 0.15 * self.orca_length + 1.15 * speed / gait.turn + 0.5 * speed / STEER_GAIN
 
     def _wander_heading(self, actor: Orca | Fish, dt: float) -> float:
         actor.wander += (-actor.wander / 1.5) * dt + 0.35 * math.sqrt(2 * dt / 1.5) * self.rng.gauss(0, 1)
@@ -130,21 +176,113 @@ class World:
         h = actor.body.heading
         return h + actor.wander - 0.35 * math.sin(2 * h)
 
+    def _gap(self) -> float:
+        """Distance between the orca and the salmon, centre to centre, in px."""
+        a, b = self.orca.body, self.fish.body
+        return math.hypot(b.x - a.x, b.y - a.y)
+
     # ------------------------------------------------------------------ orca
+
+    def _contact(self) -> bool:
+        """The orca's mouth is within the salmon's half-length of its centre."""
+        mx, my = nose(self.orca.body, self.orca_length)
+        fb = self.fish.body
+        return math.hypot(fb.x - mx, fb.y - my) < 0.5 * self.fish_length
+
+    def _orca_next(self, o: Orca) -> OrcaMode:
+        f = self.fish
+        match o.mode:
+            case OrcaMode.CRUISE:
+                if f and f.mode is not FishMode.ENTER and o.age >= o.dwell:
+                    return OrcaMode.STALK
+            case OrcaMode.STALK:
+                if not f or o.age >= STALK_GIVE_UP:
+                    return OrcaMode.CRUISE
+                if self._contact():
+                    return OrcaMode.CHOMP
+                if (o.age >= LUNGE_COOLDOWN and self._gap() <= LUNGE_RANGE * self.orca_length
+                        and self._aligned(o) and self._room_ahead(o)):
+                    return OrcaMode.LUNGE
+            case OrcaMode.LUNGE:
+                if f and self._contact():
+                    return OrcaMode.CHOMP
+                if not f or o.age >= LUNGE_SECONDS or not self._room_ahead(o, 0.3):
+                    return OrcaMode.STALK
+            case OrcaMode.CHOMP:
+                if o.age >= CHOMP_SECONDS:
+                    return OrcaMode.SATED
+            case OrcaMode.SATED:
+                if o.age >= o.dwell:
+                    return OrcaMode.CRUISE
+        return o.mode
+
+    def _aligned(self, o: Orca) -> bool:
+        fb = self.fish.body
+        bearing = math.atan2(fb.y - o.body.y, fb.x - o.body.x)
+        return abs(wrap(bearing - o.body.heading)) < LUNGE_ALIGN
+
+    def _room_ahead(self, o: Orca, seconds: float = LUNGE_ROOM) -> bool:
+        """Whether a lunge's straight path stays inside the work area, with a little slack."""
+        reach = ORCA_GAITS[OrcaMode.LUNGE].speed[1] * self.unit * seconds
+        b = o.body
+        return self.area.inset(0.2 * self.orca_length).contains(
+            b.x + math.cos(b.heading) * reach, b.y + math.sin(b.heading) * reach)
 
     def _begin_orca_mode(self, mode: OrcaMode) -> None:
         o = self.orca
         o.mode, o.age = mode, 0.0
         o.speed_goal = self.rng.uniform(*ORCA_GAITS[mode].speed) * self.unit
+        if mode is OrcaMode.CRUISE:
+            o.dwell = self.rng.uniform(*CRUISE_SECONDS)
+        elif mode is OrcaMode.SATED:
+            o.dwell = self.rng.uniform(*SATED_SECONDS)
+
+    def _enter_orca_mode(self, new: OrcaMode) -> None:
+        old = self.orca.mode
+        self._emit("orca", old, new)
+        self._begin_orca_mode(new)
+        if new is OrcaMode.CHOMP:
+            self._catch()
+        elif old is OrcaMode.SATED and new is OrcaMode.CRUISE:
+            self._spawn_fish()
+
+    def _catch(self) -> None:
+        o, f = self.orca, self.fish
+        self._emit("salmon", f.mode, FishMode.CAUGHT)
+        self.fish = None
+        b = o.body
+        mx, my = nose(b, self.orca_length)
+        o.bubbles.burst(mx, my, math.cos(b.heading) * b.speed, math.sin(b.heading) * b.speed, self.rng)
+
+    def _aim(self, lead: float) -> float:
+        """Heading toward where the salmon will be if it keeps going, `lead` scaling how far ahead."""
+        b, fb = self.orca.body, self.fish.body
+        t = min(lead * self._gap() / max(b.speed, 200 * self.unit), 1.0)
+        return math.atan2(fb.y + math.sin(fb.heading) * fb.speed * t - b.y,
+                          fb.x + math.cos(fb.heading) * fb.speed * t - b.x)
 
     def _step_orca(self, dt: float) -> None:
         o, b = self.orca, self.orca.body
-        gait = ORCA_GAITS[o.mode]
         o.age += dt
-        target, boost = avoid_edges(b, self._wander_heading(o, dt), self.area, self._margin(b, o.speed_goal, gait))
+        nxt = self._orca_next(o)
+        if nxt is not o.mode:
+            self._enter_orca_mode(nxt)
+        gait = ORCA_GAITS[o.mode]
+        if o.mode is OrcaMode.STALK:
+            want = self._aim(0.5)
+        elif o.mode is OrcaMode.LUNGE:
+            want = self._aim(1.0)
+        else:
+            want = self._wander_heading(o, dt)
+        target, boost = avoid_edges(b, want, self.area, self._margin(b, o.speed_goal, gait))
         steer(b, target, gait.turn * boost, dt)
         accelerate(b, o.speed_goal, gait.accel * self.unit, dt)
         advance(b, ORCA.beat_hz * (0.6 + 0.4 * b.speed / (ORCA_BEAT_SPEED * self.unit)), dt)
+
+        goal = 1.0 if o.mode is OrcaMode.LUNGE else 0.0
+        rate = (JAW_OPEN_RATE if goal > o.jaw_open else JAW_CLOSE_RATE) * dt
+        o.jaw_open += max(-rate, min(rate, goal - o.jaw_open))
+
         vents = [self.anchor(b, self.orca_length, u, v) for u, v in ORCA.vents]
         o.bubbles.emit(dt, vents, math.cos(b.heading) * b.speed, math.sin(b.heading) * b.speed, self.rng)
         o.bubbles.update(dt)
@@ -154,8 +292,7 @@ class World:
     def _spawn_fish(self) -> None:
         """A new salmon just off a random edge, away from the orca, swimming in."""
         a, rng = self.area, self.rng
-        wander_gait = FISH_GAITS[FishMode.WANDER]
-        inner = a.inset(self._margin(Body(0, 0, 0, 0), wander_gait.speed[1] * self.unit, wander_gait))
+        inner = self._fish_inner()
         off = 0.5 * self.fish_length + 30
 
         def candidate() -> tuple[float, float]:
@@ -174,17 +311,40 @@ class World:
         self._begin_fish_mode(FishMode.ENTER)
         self._emit("salmon", None, FishMode.ENTER)
 
+    def _fish_inner(self) -> Rect:
+        """Where a wandering salmon lives; ENTER swims to a point in here and ends on reaching it."""
+        gait = FISH_GAITS[FishMode.WANDER]
+        return self.area.inset(self._margin(Body(0, 0, 0, 0), gait.speed[1] * self.unit, gait))
+
     def _begin_fish_mode(self, mode: FishMode) -> None:
         f = self.fish
-        f.mode, f.age = mode, 0.0
-        f.speed_goal = self.rng.uniform(*FISH_GAITS[mode].speed) * self.unit
+        f.mode, f.age, f.dodge_left = mode, 0.0, 0.0
+        lo, hi = FISH_GAITS[mode].speed
+        f.speed_goal = (lo if mode is FishMode.FLEE else self.rng.uniform(lo, hi)) * self.unit
 
     def _fish_next(self, f: Fish) -> FishMode:
-        if f.mode is FishMode.ENTER:
-            gait = FISH_GAITS[FishMode.WANDER]
-            if self.area.inset(self._margin(f.body, f.speed_goal, gait)).contains(f.body.x, f.body.y):
-                return FishMode.WANDER
+        hunted = self.orca.mode in (OrcaMode.STALK, OrcaMode.LUNGE)
+        reach = self.orca_length * (THREAT_RELEASE if f.mode is FishMode.FLEE else THREAT_RANGE)
+        match f.mode:
+            case FishMode.ENTER:
+                if self._fish_inner().contains(f.body.x, f.body.y):
+                    return FishMode.WANDER
+            case FishMode.WANDER:
+                if hunted and self._gap() < reach:
+                    return FishMode.FLEE
+            case FishMode.FLEE:
+                if not (hunted and self._gap() < reach):
+                    return FishMode.WANDER
         return f.mode
+
+    def _flee_heading(self, f: Fish, dt: float) -> float:
+        """Directly away from the orca, plus jittery dodges to either side."""
+        f.dodge_left -= dt
+        if f.dodge_left <= 0:
+            f.dodge_left = self.rng.uniform(0.2, 0.5)
+            f.dodge = self.rng.choice((-1, 1)) * self.rng.uniform(0.5, 1.0)
+        ob, b = self.orca.body, f.body
+        return math.atan2(b.y - ob.y, b.x - ob.x) + f.dodge
 
     def _step_fish(self, dt: float) -> None:
         f, b = self.fish, self.fish.body
@@ -198,7 +358,14 @@ class World:
         if f.mode is FishMode.ENTER:
             target = math.atan2(f.goal[1] - b.y, f.goal[0] - b.x)
         else:
-            target, boost = avoid_edges(b, self._wander_heading(f, dt), self.area, self._margin(b, f.speed_goal, gait))
+            if f.mode is FishMode.FLEE:
+                if f.age >= FLEE_REACTION:
+                    close = max(0.0, 1.0 - self._gap() / (THREAT_RANGE * self.orca_length))
+                    f.speed_goal = (gait.speed[0] + (gait.speed[1] - gait.speed[0]) * close) * self.unit
+                want = self._flee_heading(f, dt)
+            else:
+                want = self._wander_heading(f, dt)
+            target, boost = avoid_edges(b, want, self.area, self._margin(b, f.speed_goal, gait))
         steer(b, target, gait.turn * boost, dt)
         accelerate(b, f.speed_goal, gait.accel * self.unit, dt)
         advance(b, SALMON.beat_hz * (0.6 + 0.4 * b.speed / (FISH_BEAT_SPEED * self.unit)), dt)

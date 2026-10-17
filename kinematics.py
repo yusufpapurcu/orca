@@ -10,6 +10,7 @@ STEER_GAIN = 4.0  # 1/s; turn rate is proportional to the heading error, then ca
 FLIP_SECONDS = 0.35
 FLIP_DEADBAND = 0.15  # cos(heading) must point this far the other way before the sprite flips
 MAX_PITCH = math.radians(55)
+BRAKE = 3.0
 EDGE_TILT = 2.0
 EDGE_URGENCY = 2.0
 
@@ -49,8 +50,10 @@ def steer(body: Body, target_heading: float, max_turn_rate: float, dt: float) ->
 
 
 def accelerate(body: Body, target_speed: float, accel: float, dt: float) -> None:
-    step = accel * dt
-    body.speed += max(-step, min(step, target_speed - body.speed))
+    """Move speed toward the target. Animals brake harder than they accelerate."""
+    err = target_speed - body.speed
+    step = accel * dt * (1.0 if err > 0 else BRAKE)
+    body.speed += max(-step, min(step, err))
 
 
 def advance(body: Body, beat_hz: float, dt: float) -> None:
@@ -67,11 +70,12 @@ def advance(body: Body, beat_hz: float, dt: float) -> None:
 def avoid_edges(body: Body, target_heading: float, area: Rect, margin: float) -> tuple[float, float]:
     """Bend target_heading so the body slides along an edge and then away from it.
 
-    Returns the heading and a turn-rate multiplier. Only a target that points at
-    an edge is changed: it becomes the edge's tangent on the side the body
-    already leans toward (the middle breaks a head-on tie), tilted inward more
-    the deeper the body is inside `margin`. The multiplier rises with depth so
-    a late turn is tighter, as an animal in a hurry would.
+    Returns the heading and a turn-rate multiplier. Only a target, or a body,
+    that points at an edge triggers it. The target then becomes the edge's
+    tangent on the side the body already leans toward (the middle breaks a
+    head-on tie), tilted inward more the deeper the body is inside `margin`.
+    The multiplier rises with depth so a late turn is tighter, as an animal
+    in a hurry would.
     """
     def depth(c: float, lo: float, hi: float) -> float:
         return max(0.0, (lo + margin - c) / margin) - max(0.0, (c - (hi - margin)) / margin)
@@ -83,7 +87,8 @@ def avoid_edges(body: Body, target_heading: float, area: Rect, margin: float) ->
     d = min(d, 1.0)
     nx, ny = px / math.hypot(px, py), py / math.hypot(px, py)
     boost = 1.0 + EDGE_URGENCY * d
-    if math.cos(target_heading) * nx + math.sin(target_heading) * ny >= 0:
+    if (math.cos(target_heading) * nx + math.sin(target_heading) * ny >= 0
+            and math.cos(body.heading) * nx + math.sin(body.heading) * ny >= 0):
         return target_heading, boost
     lean = math.sin(body.heading) * nx - math.cos(body.heading) * ny
     mx, my = (area.left + area.right) / 2 - body.x, (area.top + area.bottom) / 2 - body.y
@@ -117,3 +122,9 @@ def projector(origin: tuple[float, float], length: float, xscale: float, pitch: 
         return ox + xscale * (x * c + y * s), oy + (y * c - x * s)
 
     return project
+
+
+def nose(body: Body, length: float) -> tuple[float, float]:
+    """Screen position of the nose, as drawn when not mid-flip."""
+    _, pitch = view(body)
+    return projector((body.x, body.y), length, body.facing, pitch)(0.0, 0.0)

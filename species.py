@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from anatomy import Part, Profile, Pt, Rim, Species, ellipse
+import math
+
+from anatomy import Jaw, Part, Profile, Pt, Rim, Species, ellipse
 
 EYE_U, EYE_V = 0.100, -0.008
 
@@ -33,6 +35,7 @@ ORCA = Species(
         "grey": "#8a929b",
         "eye_ring": "#2b323a",
         "eye": "#020304",
+        "mouth": "#8c3a4a",
     },
     parts=(
         Part("flukes", "black", 0, (
@@ -114,6 +117,16 @@ ORCA = Species(
     # The near-black body vanishes against dark windows, so it gets a thin pale rim.
     outline_color="#6a7b8e",
     outline_px=4,
+    jaw=Jaw(
+        hinge=(0.170, 0.034),
+        lip=((0.004, 0.008), (0.040, 0.014), (0.090, 0.022), (0.135, 0.029), (0.170, 0.034)),
+        max_open=math.radians(42),
+        teeth=5,
+        order=2,
+        mouth="mouth",
+        chin="white",
+        tooth="white",
+    ),
 )
 
 

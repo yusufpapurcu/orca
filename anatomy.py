@@ -102,6 +102,20 @@ def ellipse(cu: float, cv: float, ru: float, rv: float, deg: float, n: int = 12)
     return tuple(pts)
 
 
+@dataclass(frozen=True)
+class Jaw:
+    """A hinged lower jaw. Opening it paints a mouth wedge between the lips."""
+
+    hinge: tuple[float, float]  # (u, v) of the mouth corner
+    lip: tuple[tuple[float, float], ...]  # mouth line, nose end first, hinge last
+    max_open: float  # radians when fully open
+    teeth: int  # per jaw
+    order: int  # drawn after every part with order <= this
+    mouth: str  # palette keys
+    chin: str
+    tooth: str
+
+
 @dataclass(frozen=True, eq=False)
 class Species:
     name: str
@@ -116,6 +130,7 @@ class Species:
     bubble_room: float  # window margin for bubbles, in body lengths
     outline_color: str
     outline_px: int  # supersampled pixels the outline copies are shifted by
+    jaw: Jaw | None = None
 
 
 MAX_STEP = 0.012
@@ -168,6 +183,24 @@ def fin_height(flutter: float, phase: float) -> float:
     return max(0.3, 1.0 - flutter * dip + 0.25 * flutter * math.sin(2 * math.pi * phase))
 
 
+Triangle = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+
+
+@dataclass(frozen=True)
+class BakedJaw:
+    jaw: Jaw
+    mouth: tuple[int, int, int, int]
+    chin: tuple[int, int, int, int]
+    tooth: tuple[int, int, int, int]
+    lower: tuple[tuple[float, float], ...]  # the lower jaw outline, closed
+    upper_teeth: tuple[Triangle, ...]
+    lower_teeth: tuple[Triangle, ...]  # in the closed jaw's frame, so they rotate with it
+    parts_below: int  # how many parts are drawn before the jaw
+
+
+TOOTH_W, TOOTH_H = 0.005, 0.013
+
+
 @dataclass(frozen=True, eq=False)
 class Rig:
     """A compiled Species: baked parts in draw order plus the spine deformation."""
@@ -177,6 +210,7 @@ class Rig:
     outline_color: tuple[int, int, int, int]
     outline_offsets: tuple[tuple[int, int], ...]
     reach: float  # radius, in body lengths, around the centre that holds the animal at any pose
+    jaw: BakedJaw | None = None
 
     def spine(self, u: float, phase: float) -> tuple[float, float, float, float]:
         """Spine point and unit tangent at u. Phase is in tail-beat cycles.
@@ -207,9 +241,39 @@ def compile_species(sp: Species) -> Rig:
         for p in sorted(sp.parts, key=lambda p: p.order)
     )
     k = sp.outline_px
-    rig = Rig(sp, parts, (*ImageColor.getrgb(sp.outline_color), 255), ((k, 0), (-k, 0), (0, k), (0, -k)), 0.0)
+    rig = Rig(sp, parts, (*ImageColor.getrgb(sp.outline_color), 255), ((k, 0), (-k, 0), (0, k), (0, -k)), 0.0,
+              _bake_jaw(sp, rgba) if sp.jaw else None)
     object.__setattr__(rig, "reach", _reach(rig))
     return rig
+
+
+def _bake_jaw(sp: Species, rgba) -> BakedJaw:
+    jaw = sp.jaw
+    hu = jaw.hinge[0]
+    ventral = [(hu * (1 - i / 6), sp.profile.rim_v(hu * (1 - i / 6), 1)) for i in range(7)]
+    lower = (*jaw.lip, *ventral)
+
+    seg = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(jaw.lip, jaw.lip[1:])]
+    total = sum(seg)
+
+    def on_lip(frac: float) -> tuple[float, float]:
+        d = frac * total
+        for (a, b), n in zip(zip(jaw.lip, jaw.lip[1:]), seg):
+            if d <= n:
+                t = d / n
+                return a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+            d -= n
+        return jaw.lip[-1]
+
+    def teeth(dv: float) -> tuple[Triangle, ...]:
+        out = []
+        for k in range(jaw.teeth):
+            u, v = on_lip(0.14 + 0.72 * k / max(1, jaw.teeth - 1))
+            out.append(((u - TOOTH_W, v), (u + TOOTH_W, v), (u, v + dv)))
+        return tuple(out)
+
+    below = sum(1 for p in sp.parts if p.order <= jaw.order)
+    return BakedJaw(jaw, rgba(jaw.mouth), rgba(jaw.chin), rgba(jaw.tooth), lower, teeth(TOOTH_H), teeth(-TOOTH_H), below)
 
 
 def _reach(rig: Rig) -> float:
