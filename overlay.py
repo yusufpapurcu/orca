@@ -5,9 +5,9 @@ from __future__ import annotations
 import ctypes
 import sys
 from ctypes import wintypes
-from typing import NamedTuple
 
-from PIL import Image
+from kinematics import Rect
+from render import Sprite
 
 LRESULT = ctypes.c_ssize_t
 WPARAM = ctypes.c_size_t
@@ -19,7 +19,7 @@ WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW = 0x8, 0x20, 0x80
 WS_EX_LAYERED, WS_EX_NOACTIVATE = 0x80000, 0x08000000
 WM_DESTROY, WM_HOTKEY = 0x2, 0x312
 PM_REMOVE, WM_QUIT = 0x1, 0x12
-SW_SHOWNOACTIVATE = 4
+SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
 ULW_ALPHA, AC_SRC_OVER, AC_SRC_ALPHA = 2, 0, 1
 MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x1, 0x2, 0x4000
 VK_O = 0x4F
@@ -33,13 +33,6 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 winmm = ctypes.WinDLL("winmm")
-
-
-class Rect(NamedTuple):
-    left: int
-    top: int
-    right: int
-    bottom: int
 
 
 class WNDCLASSEXW(ctypes.Structure):
@@ -118,63 +111,85 @@ def primary_work_area() -> Rect:
 
 
 class Overlay:
-    """Click-through, always-on-top, focus-less layered window with a DIB backbuffer."""
+    """Click-through, always-on-top, focus-less layered window with a DIB backbuffer.
 
-    def __init__(self, width: int, height: int):
-        self.width, self.height = width, height
+    The window is resized to each sprite as it is presented. The backbuffer is
+    `size` px square, the largest sprite the owner can produce.
+    """
+
+    _instances = 0
+    _atom = 0
+    _hinst = None
+
+    def __init__(self, size: int, title: str, hotkey: bool = False):
+        self.size = size
         self.hwnd = self.screen_dc = self.mem_dc = self.bitmap = self.old_bitmap = None
         self.hotkey = False
-        self.class_atom = 0
-        hinst = kernel32.GetModuleHandleW(None)
-        self.hinst = hinst
-        wc = WNDCLASSEXW()
-        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-        wc.lpfnWndProc = _wndproc
-        wc.hInstance = hinst
-        wc.lpszClassName = CLASS_NAME
-        self.class_atom = user32.RegisterClassExW(ctypes.byref(wc))
-        if not self.class_atom:
-            raise ctypes.WinError(ctypes.get_last_error())
+        self.visible = False
+        if Overlay._instances == 0:
+            Overlay._hinst = kernel32.GetModuleHandleW(None)
+            wc = WNDCLASSEXW()
+            wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+            wc.lpfnWndProc = _wndproc
+            wc.hInstance = Overlay._hinst
+            wc.lpszClassName = CLASS_NAME
+            Overlay._atom = user32.RegisterClassExW(ctypes.byref(wc))
+            if not Overlay._atom:
+                raise ctypes.WinError(ctypes.get_last_error())
+        Overlay._instances += 1
         self.hwnd = user32.CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            CLASS_NAME, "Orca", WS_POPUP, 0, 0, width, height, None, None, hinst, None)
+            CLASS_NAME, title, WS_POPUP, 0, 0, size, size, None, None, Overlay._hinst, None)
         if not self.hwnd:
             raise ctypes.WinError(ctypes.get_last_error())
 
         self.screen_dc = user32.GetDC(None)
         self.mem_dc = gdi32.CreateCompatibleDC(self.screen_dc)
-        bmi = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), width, -height, 1, 32, 0, 0, 0, 0, 0, 0)
+        bmi = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), size, -size, 1, 32, 0, 0, 0, 0, 0, 0)
         bits = ctypes.c_void_p()
         self.bitmap = gdi32.CreateDIBSection(self.mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
         if not self.bitmap:
             raise ctypes.WinError(ctypes.get_last_error())
-        self.bits = bits.value
+        self.pixels = memoryview((ctypes.c_ubyte * (size * size * 4)).from_address(bits.value)).cast("B")
         self.old_bitmap = gdi32.SelectObject(self.mem_dc, self.bitmap)
 
         self.blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
-        self.size = wintypes.SIZE(width, height)
         self.src_origin = wintypes.POINT(0, 0)
-        self.hotkey = bool(user32.RegisterHotKey(
-            self.hwnd, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_O))
-        if not self.hotkey:
-            print("Ctrl+Alt+O is taken by another program; use Ctrl+C in the console to quit.", file=sys.stderr)
+        if hotkey:
+            self.hotkey = bool(user32.RegisterHotKey(
+                self.hwnd, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_O))
+            if not self.hotkey:
+                print("Ctrl+Alt+O is taken by another program; use Ctrl+C in the console to quit.", file=sys.stderr)
         self._msg = wintypes.MSG()
 
-    def present(self, frame: Image.Image, x: int, y: int) -> None:
-        data = frame.tobytes("raw", "BGRa")
-        ctypes.memmove(self.bits, data, len(data))
-        pos = wintypes.POINT(x, y)
+    def present(self, sprite: Sprite) -> None:
+        w, h = sprite.image.size
+        data = memoryview(sprite.image.tobytes("raw", "BGRa"))
+        row, stride = w * 4, self.size * 4
+        for r in range(h):
+            self.pixels[r * stride:r * stride + row] = data[r * row:(r + 1) * row]
+        pos, size = wintypes.POINT(sprite.x, sprite.y), wintypes.SIZE(w, h)
         ok = user32.UpdateLayeredWindow(
-            self.hwnd, self.screen_dc, ctypes.byref(pos), ctypes.byref(self.size), self.mem_dc,
+            self.hwnd, self.screen_dc, ctypes.byref(pos), ctypes.byref(size), self.mem_dc,
             ctypes.byref(self.src_origin), 0, ctypes.byref(self.blend), ULW_ALPHA)
         if not ok:
             raise ctypes.WinError(ctypes.get_last_error())
 
     def show(self) -> None:
-        user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+        if not self.visible:
+            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+            self.visible = True
+
+    def hide(self) -> None:
+        if self.visible:
+            user32.ShowWindow(self.hwnd, SW_HIDE)
+            self.visible = False
 
     def keep_on_top(self) -> None:
         user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+    def place_below(self, other: "Overlay") -> None:
+        user32.SetWindowPos(self.hwnd, other.hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def pump(self) -> bool:
         """Dispatch pending messages; False once a quit was requested."""
@@ -194,6 +209,7 @@ class Overlay:
             gdi32.SelectObject(self.mem_dc, self.old_bitmap)
             self.old_bitmap = None
         if self.bitmap:
+            self.pixels.release()
             gdi32.DeleteObject(self.bitmap)
             self.bitmap = None
         if self.mem_dc:
@@ -205,7 +221,7 @@ class Overlay:
         if self.hwnd:
             user32.DestroyWindow(self.hwnd)
             self.hwnd = None
-        if self.class_atom:
-            user32.UnregisterClassW(CLASS_NAME, self.hinst)
-            self.class_atom = 0
-
+            Overlay._instances -= 1
+            if Overlay._instances == 0 and Overlay._atom:
+                user32.UnregisterClassW(CLASS_NAME, Overlay._hinst)
+                Overlay._atom = 0

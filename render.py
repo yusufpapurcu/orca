@@ -1,4 +1,9 @@
-"""Rasterising a posed animal with Pillow at 3x supersampling."""
+"""Rasterising a posed animal with Pillow at 3x supersampling.
+
+The frame is the tight bounding box of the animal and its bubbles, not a fixed
+window: at 3x a canvas that covers every possible pose costs more than the
+drawing itself.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ from PIL import Image, ImageDraw
 
 from anatomy import Rig
 from bubbles import Bubbles
+from kinematics import Body, projector, view
 
 SS = 3
 
@@ -16,45 +22,42 @@ SS = 3
 @dataclass(frozen=True)
 class Pose:
     phase: float
-    pitch: float
-    facing: int  # +1 swims right, -1 swims left
+    pitch: float  # nose up positive
+    xscale: float  # signed horizontal scale: sign is the facing, 0 is mid-flip
+
+
+def pose_of(body: Body, pitch_extra: float = 0.0) -> Pose:
+    xscale, pitch = view(body)
+    return Pose(body.phase, pitch + pitch_extra, xscale)
 
 
 @dataclass(frozen=True)
 class Layout:
+    """Size of one animal on screen. `half` bounds any pose plus its bubbles."""
+
     length: int
-    width: int
-    height: int
-    cx: float
-    cy: float
+    half: int
 
     @staticmethod
-    def for_length(length: int) -> "Layout":
-        w, h = round(length * 1.5), round(length * 1.0)
-        return Layout(length, w, h, w / 2, h * 0.58)
+    def for_rig(rig: Rig, orca_length: float) -> "Layout":
+        length = round(orca_length * rig.species.length_frac)
+        return Layout(length, math.ceil((rig.reach + rig.species.bubble_room) * length))
+
+    @property
+    def size(self) -> int:
+        return 2 * self.half
 
 
-def projector(pose: Pose, lay: Layout, scale: float):
-    """Map spine-space (length units, nose at x=0) to canvas pixels."""
-    k = lay.length * scale
-    c, s = math.cos(pose.pitch), math.sin(pose.pitch)
-    f, ox, oy = pose.facing, lay.cx * scale, lay.cy * scale
-
-    def project(lx: float, ly: float) -> tuple[float, float]:
-        x, y = (0.5 - lx) * k, ly * k
-        return ox + f * (x * c + y * s), oy + (y * c - x * s)
-
-    return project
+@dataclass(frozen=True)
+class Sprite:
+    image: Image.Image  # premultiplied "RGBa"
+    x: int  # screen position of the top-left corner
+    y: int
 
 
-def body_anchor(rig: Rig, u: float, v: float, pose: Pose, lay: Layout) -> tuple[float, float]:
-    return projector(pose, lay, 1)(*rig.bend(u, v, pose.phase))
-
-
-def draw_animal(draw: ImageDraw.ImageDraw, rig: Rig, pose: Pose, lay: Layout) -> None:
-    project = projector(pose, lay, SS)
-    phase = pose.phase
+def _place(rig: Rig, pose: Pose, project):
     placed = []
+    phase = pose.phase
     for part in rig.parts:
         if part.attach is None:
             pts = [project(*rig.bend(u, v, phase)) for u, v in part.points]
@@ -63,43 +66,69 @@ def draw_animal(draw: ImageDraw.ImageDraw, rig: Rig, pose: Pose, lay: Layout) ->
             nx, ny = -ty, tx
             pts = [project(fx + a * tx + b * nx, fy + a * ty + b * ny) for a, b in part.points]
         placed.append((part, pts))
-    # Outline copies are drawn underneath everything as offset polygons (a wide
-    # draw.line is several times slower).
-    for part, pts in placed:
-        if part.outline:
-            for dx, dy in rig.outline_offsets:
-                draw.polygon([(x + dx, y + dy) for x, y in pts], fill=rig.outline_color)
-    for part, pts in placed:
-        draw.polygon(pts, fill=part.color)
+    return placed
 
 
-def draw_bubbles(draw: ImageDraw.ImageDraw, bubbles: Bubbles) -> None:
+def _draw_bubbles(draw: ImageDraw.ImageDraw, bubbles: Bubbles, ax: int, ay: int, bx: int, by: int, front: bool) -> None:
     for b in bubbles.items:
+        if b.front != front:
+            continue
         fade = 1.0 - (b.age / b.life) ** 2
-        x, y, r = b.x * SS, b.y * SS, b.r * SS
+        x, y, r = (b.x - ax) * SS - bx, (b.y - ay) * SS - by, b.r * SS
         fill, line = int(46 * fade), int(215 * fade)
         draw.ellipse((x - r, y - r, x + r, y + r), fill=(fill,) * 4, outline=(line,) * 4, width=max(1, SS - 1))
 
 
-def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout) -> Image.Image:
-    """Return the frame as a premultiplied "RGBa" image of the window size.
+def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, x: float, y: float) -> Sprite:
+    """Draw the animal centred on screen position (x, y).
 
-    The canvas is premultiplied from the start (opaque parts have alpha 255,
-    bubbles use equal colour and alpha), so the box reduce is a correct
+    The canvas is premultiplied "RGBa" from the start (opaque parts have alpha
+    255, bubbles use equal colour and alpha), so the box reduce is a correct
     premultiplied downsample with no per-frame RGBA/RGBa conversion.
     """
-    big = Image.new("RGBa", (lay.width * SS, lay.height * SS))
+    ax, ay = round(x), round(y)
+    project = projector(((x - ax) * SS, (y - ay) * SS), lay.length * SS, pose.xscale, pose.pitch)
+    placed = _place(rig, pose, project)
+
+    lo_x = lo_y = math.inf
+    hi_x = hi_y = -math.inf
+    for _, pts in placed:
+        xs, ys = zip(*pts)
+        lo_x, hi_x = min(lo_x, min(xs)), max(hi_x, max(xs))
+        lo_y, hi_y = min(lo_y, min(ys)), max(hi_y, max(ys))
+    pad = rig.species.outline_px + SS
+    lo_x, hi_x, lo_y, hi_y = lo_x - pad, hi_x + pad, lo_y - pad, hi_y + pad
+    for b in bubbles.items:
+        r = (b.r + 1) * SS
+        bxc, byc = (b.x - ax) * SS, (b.y - ay) * SS
+        lo_x, hi_x = min(lo_x, bxc - r), max(hi_x, bxc + r)
+        lo_y, hi_y = min(lo_y, byc - r), max(hi_y, byc + r)
+    cap = lay.half * SS
+    bx = max(-cap, math.floor(lo_x / SS) * SS)
+    by = max(-cap, math.floor(lo_y / SS) * SS)
+    w = min(cap, math.ceil(hi_x / SS) * SS) - bx
+    h = min(cap, math.ceil(hi_y / SS) * SS) - by
+
+    big = Image.new("RGBa", (w, h))
     draw = ImageDraw.Draw(big)
-    draw_bubbles(draw, bubbles)
-    draw_animal(draw, rig, pose, lay)
-    return big.reduce(SS)
+    _draw_bubbles(draw, bubbles, ax, ay, bx, by, front=False)
+    for part, pts in placed:
+        if part.outline:
+            for dx, dy in rig.outline_offsets:
+                draw.polygon([(px + dx - bx, py + dy - by) for px, py in pts], fill=rig.outline_color)
+    for part, pts in placed:
+        draw.polygon([(px - bx, py - by) for px, py in pts], fill=part.color)
+    _draw_bubbles(draw, bubbles, ax, ay, bx, by, front=True)
+    return Sprite(big.reduce(SS), ax + bx // SS, ay + by // SS)
 
 
 def make_sheet(rig: Rig, lay: Layout, frames: int = 6) -> Image.Image:
     cols = 3
     rows = math.ceil(frames / cols)
-    bg = Image.new("RGBA", (lay.width * cols, lay.height * rows), (96, 140, 176, 255))
+    cell = lay.size
+    bg = Image.new("RGBA", (cell * cols, cell * rows), (96, 140, 176, 255))
     for k in range(frames):
-        frame = render(rig, Pose(k / frames, 0.0, 1), Bubbles(), lay).convert("RGBA")
-        bg.alpha_composite(frame, ((k % cols) * lay.width, (k // cols) * lay.height))
+        cx, cy = (k % cols) * cell + lay.half, (k // cols) * cell + lay.half
+        s = render(rig, Pose(k / frames, 0.0, 1.0), Bubbles(), lay, cx, cy)
+        bg.alpha_composite(s.image.convert("RGBA"), (s.x, s.y))
     return bg

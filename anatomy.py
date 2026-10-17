@@ -109,6 +109,8 @@ class Species:
     wave_cycles: float  # wavelengths along the body
     beat_hz: float
     length_frac: float  # body length as a fraction of the orca's
+    vents: tuple[tuple[float, float], ...]  # (u, v) points bubbles rise from
+    bubble_room: float  # window margin for bubbles, in body lengths
     outline_color: str
     outline_px: int  # supersampled pixels the outline copies are shifted by
 
@@ -164,6 +166,7 @@ class Rig:
     parts: tuple[BakedPart, ...]
     outline_color: tuple[int, int, int, int]
     outline_offsets: tuple[tuple[int, int], ...]
+    reach: float  # radius, in body lengths, around the centre that holds the animal at any pose
 
     def spine(self, u: float, phase: float) -> tuple[float, float, float, float]:
         """Spine point and unit tangent at u. Phase is in tail-beat cycles.
@@ -194,4 +197,19 @@ def compile_species(sp: Species) -> Rig:
         for p in sorted(sp.parts, key=lambda p: p.order)
     )
     k = sp.outline_px
-    return Rig(sp, parts, (*ImageColor.getrgb(sp.outline_color), 255), ((k, 0), (-k, 0), (0, k), (0, -k)))
+    rig = Rig(sp, parts, (*ImageColor.getrgb(sp.outline_color), 255), ((k, 0), (-k, 0), (0, k), (0, -k)), 0.0)
+    object.__setattr__(rig, "reach", _reach(rig))
+    return rig
+
+
+def _reach(rig: Rig) -> float:
+    far = 0.0
+    for phase in (i / 8 for i in range(8)):
+        for part in rig.parts:
+            if part.attach is None:
+                pts = [rig.bend(u, v, phase) for u, v in part.points]
+            else:
+                fx, fy, tx, ty = rig.spine(part.attach, phase)
+                pts = [(fx + a * tx - b * ty, fy + a * ty + b * tx) for a, b in part.points]
+            far = max(far, max(math.hypot(0.5 - x, y) for x, y in pts))
+    return far
