@@ -23,7 +23,6 @@ DT = 1 / 60
 BLUE = (96, 140, 176, 255)
 GUIDE = (70, 105, 135, 255)
 INK = (240, 246, 250, 255)
-DARK = (22, 29, 39, 255)
 FONT = ImageFont.load_default(size=13)
 SETTLED = 0.12  # radians the tail may still be off its goal when a turn counts as over
 
@@ -140,6 +139,7 @@ def make_turn_sheet(orca_len: float = 260.0) -> Image.Image:
 def make_turn_gif(kind: str, path: str, orca_len: float = 240.0) -> None:
     """A few turns at true screen motion: out to the right, back, out again, 30 fps."""
     w, h = 900, 330
+    orca_len = orca_len * (2.4 if kind == "salmon" else 1.0)  # the salmon is a third of the orca, too small to read
     scene = [(0.0, 0.0), (0.7, math.pi), (2.45, 0.0), (4.2, math.pi), (5.5, 0.0)]
     seconds = 7.0
 
@@ -158,7 +158,7 @@ def make_turn_gif(kind: str, path: str, orca_len: float = 240.0) -> None:
     sw, bodies = run((w - (hi - lo)) / 2 - lo, h / 2)
     frames = []
     for b in bodies:
-        img = Image.new("RGBA", (w, h), DARK)
+        img = Image.new("RGBA", (w, h), BLUE)
         sw.draw(img, b)
         frames.append(img.convert("RGB"))
     pal = Image.new("RGB", (w, h * 3))
