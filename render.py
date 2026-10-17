@@ -163,29 +163,54 @@ def _jaw_layers(place: Placement) -> list[Layer]:
     return layers
 
 
-def _tube(place: Placement) -> tuple[list[tuple[float, list[Layer]]], list[np.ndarray]]:
+def _slabs(pts: np.ndarray, nxt: np.ndarray) -> list[np.ndarray]:
+    """Each section joined to the one after it as a single convex piece: the hull of the two.
+
+    Sections are convex loops with the same vertex order. The hull of a pair is
+    the first loop's edges, except the ones that face the way the section moves,
+    which come from the second loop, with a bridge where the two meet. Stacked
+    sections then leave no scallops between them.
+    """
+    loop = np.roll(pts, -1, axis=1)
+    edge = loop - pts
+    area = np.sum(pts[..., 0] * loop[..., 1] - loop[..., 0] * pts[..., 1], axis=1)
+    facing = np.stack([edge[..., 1], -edge[..., 0]], axis=-1) * np.where(area > 0, 1.0, -1.0)[:, None, None]
+    move = nxt - pts
+    move = 0.5 * (move + np.roll(move, -1, axis=1))
+    ahead = np.sum(facing * move, axis=-1) > 0
+    behind = np.roll(ahead, 1, axis=1)
+    first = np.where(behind[..., None], nxt, pts)
+    second = np.where(ahead[..., None], nxt, pts)
+    both = np.stack([first, second], axis=2).reshape(len(pts), -1, 2)
+    keep = np.stack([np.ones_like(ahead), ahead != behind], axis=2).reshape(len(pts), -1)
+    return [p[k] for p, k in zip(both, keep)]
+
+
+def _tube(place: Placement) -> list[tuple[float, list[Layer]]]:
     """The body as a round tube, so seen from the front or back it keeps its width.
 
-    Cross-sections, widened by sin(yaw) at each station, are unioned with the
-    side-view silhouette. Returns the fills, each with its depth, and the pale halos around them.
+    Cross-sections, widened by sin(yaw) at each station and joined in pairs, are
+    unioned with the side-view silhouette. Returns the fills, each with its depth.
     """
     rig, pose = place.rig, place.pose
     spin = pose.spin
     sp = np.sin(spin.at(TUBE_AT))
-    active = np.nonzero(np.abs(sp) >= END_ON)[0]
+    on = np.abs(sp) >= END_ON
+    active = np.nonzero(on)[0]
     if len(active) == 0:
-        return [], []
-    u, sp = TUBE_AT[active, None], sp[active, None]
+        return []
+    u, sp = TUBE_AT[:, None], sp[:, None]
     rd, rv = radii(rig.species.profile, u)
     sn = np.sin(TUBE_ANGLE)[None, :]
     bx, by = rig.bend(u, sn * np.where(sn > 0, rv, rd), pose.phase)
     pts = place.project(bx, by, WIDTH * 0.5 * (rd + rv) * sp * np.cos(TUBE_ANGLE)[None, :])
-    centre = pts.mean(axis=1, keepdims=True)
-    out = pts - centre
-    halos = pts + rig.species.outline_px * out / np.maximum(np.hypot(out[..., 0], out[..., 1]), 1e-9)[..., None]
+    nxt = np.concatenate([pts[1:], pts[-1:]])
+    lone = ~np.append(on[1:], False)
+    nxt[lone] = pts[lone]
     body = next(p for p in rig.parts if p.name == "body")
     color = tint(body.color, spin.z)
-    return [(place.depth(float(ui)), [(color, p)]) for ui, p in zip(TUBE_AT[active], pts)], list(halos)
+    slabs = _slabs(pts[active], nxt[active])
+    return [(place.depth(float(ui)), [(color, p)]) for ui, p in zip(TUBE_AT[active], slabs)]
 
 
 def _midline_fin(place: Placement, part: BakedPart) -> list[np.ndarray]:
@@ -231,8 +256,8 @@ def _flipper(place: Placement, part: BakedPart, flank: int) -> tuple[list[np.nda
     return [pts[lo:hi] for lo, hi in (fin.spans if abs(sp) > BLADE_ON else fin.spans[:1])], near
 
 
-def _place(place: Placement) -> tuple[list[np.ndarray], list[np.ndarray], list[Layer]]:
-    """Outline polygons, tube halos and the colour layers, back to front, in canvas coordinates.
+def _place(place: Placement) -> tuple[list[np.ndarray], list[Layer]]:
+    """Outline polygons and the colour layers, back to front, in canvas coordinates.
 
     The body outline goes down first, then a scene sorted by how far toward the
     viewer each piece is: the round body's cross-sections and any fin seen more
@@ -286,12 +311,13 @@ def _place(place: Placement) -> tuple[list[np.ndarray], list[np.ndarray], list[L
                 late += [(color, pts) for pts in shapes]
     if jaw:
         layers += _jaw_layers(place)
-    fills, halos = _tube(place)
-    scene += fills
+    tube = _tube(place)
+    outlines += [pts for _, group in tube for _, pts in group]
+    scene += tube
     scene.sort(key=lambda item: item[0])
     layers[1:1] = [layer for _, group in scene for layer in group]
     layers[0:0] = back
-    return outlines, halos, layers + late
+    return outlines, layers + late
 
 
 def _draw_bubbles(draw: ImageDraw.ImageDraw, bubbles: Bubbles, ax: int, ay: int, bx: int, by: int, front: bool) -> None:
@@ -313,7 +339,7 @@ def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, x: float, y: flo
     """
     ax, ay = round(x), round(y)
     place = Placement(rig, pose, lay.length * SS, ((x - ax) * SS, (y - ay) * SS))
-    outlines, halos, layers = _place(place)
+    outlines, layers = _place(place)
 
     every = np.concatenate([pts for _, pts in layers])
     pad = rig.species.outline_px + SS
@@ -338,8 +364,6 @@ def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, x: float, y: flo
     # draw.line is several times slower.
     rim = tint(rig.outline_color, pose.spin.z)
     for pts in _grown(outlines, rig.species.outline_px):
-        draw.polygon((pts + shift).ravel().tolist(), fill=rim)
-    for pts in halos:
         draw.polygon((pts + shift).ravel().tolist(), fill=rim)
     for color, pts in layers:
         draw.polygon((pts + shift).ravel().tolist(), fill=color)
