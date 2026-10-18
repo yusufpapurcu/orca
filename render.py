@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 
 from anatomy import BakedPart, Rig, fin_height
 from bubbles import Bubbles
-from projection import CAM, PERSP_NEAR, WIDTH, Placement, Pose, radii, tint
+from projection import CAM, PERSP_NEAR, S_NEAR, WIDTH, Camera, Placement, Pose, radii, tint
 
 SS = 3
 TUBE_STATIONS = 28
@@ -28,6 +28,7 @@ MIN_ANG, MAX_ANG = math.radians(40), math.radians(72)  # a rolled pair of flippe
 BEHIND = 0.3  # a flipper this much on the near flank is in front of the body, otherwise it is behind it
 FLANK_DEPTH = 0.1  # body lengths a flank lies toward the viewer of the spine, for drawing order
 AWAY = 0.7  # sin(yaw) at which a head turned away from the viewer hides its jaw
+BEHIND_HAZE = 0.135  # extra haze on a fin behind the body
 END_ON = 0.07  # |sin(yaw)| above which a section of the body is seen far enough end-on to need its round cross-section
 BLADE_ON = 0.05  # |sin(yaw)| above which a fin's end-on blade is drawn
 
@@ -47,7 +48,7 @@ class Layout:
     @staticmethod
     def for_rig(rig: Rig, orca_length: float) -> "Layout":
         length = round(orca_length * rig.species.length_frac)
-        reach = rig.reach * (1 + 1.6 * PERSP_NEAR) + 1.6 * CAM + rig.species.bubble_room
+        reach = (rig.reach * (1 + 1.6 * PERSP_NEAR) + 1.6 * CAM) * S_NEAR * 1.3 + rig.species.bubble_room
         return Layout(length, math.ceil(reach * length))
 
     @property
@@ -60,6 +61,7 @@ class Sprite:
     image: Image.Image  # premultiplied "RGBa"
     x: int  # screen position of the top-left corner
     y: int
+    alpha: float = 1.0  # whole-sprite opacity: a deep animal fades into the water
 
 
 def _hull(pts: np.ndarray) -> np.ndarray:
@@ -113,9 +115,9 @@ def _jaw_layers(place: Placement) -> list[Layer]:
     jaw = bj.jaw
     hu, hv = jaw.hinge
     psi = float(pose.spin.at(hu))
-    if math.sin(psi) < -AWAY:
+    if math.sin(psi) > AWAY:
         return []
-    z = pose.spin.z
+    z = place.haze
     end_on = _smooth(abs(math.sin(psi)), 0.15, 0.5)
     ang = jaw.max_open * pose.jaw_open
     ca, sa = math.cos(ang), math.sin(ang)
@@ -203,12 +205,12 @@ def _tube(place: Placement) -> list[tuple[float, list[Layer]]]:
     rd, rv = radii(rig.species.profile, u)
     sn = np.sin(TUBE_ANGLE)[None, :]
     bx, by = rig.bend(u, sn * np.where(sn > 0, rv, rd), pose.phase)
-    pts = place.project(bx, by, WIDTH * 0.5 * (rd + rv) * sp * np.cos(TUBE_ANGLE)[None, :])
+    pts = place.project(bx, by, -WIDTH * 0.5 * (rd + rv) * sp * np.cos(TUBE_ANGLE)[None, :])
     nxt = np.concatenate([pts[1:], pts[-1:]])
     lone = ~np.append(on[1:], False)
     nxt[lone] = pts[lone]
     body = next(p for p in rig.parts if p.name == "body")
-    color = tint(body.color, spin.z)
+    color = tint(body.color, place.haze)
     slabs = _slabs(pts[active], nxt[active])
     return [(place.depth(float(ui)), [(color, p)]) for ui, p in zip(TUBE_AT[active], slabs)]
 
@@ -248,10 +250,10 @@ def _flipper(place: Placement, part: BakedPart, flank: int) -> tuple[list[np.nda
         return None
     rd, rv = radii(rig.species.profile, part.attach)
     root = 0.9 * WIDTH * 0.5 * float(rd + rv)
-    ang = max(MIN_ANG, min(MAX_ANG, DELTA0 + flank * spin.bank * 0.5))
+    ang = max(MIN_ANG, min(MAX_ANG, DELTA0 - flank * spin.bank * 0.5))
     kv, kl = max(math.sin(ang) / SIN0, 0.15), 0.65 * math.cos(ang) / SIN0
     a, b = fin.ab[:, 0], fin.ab[:, 1]
-    out = -sp * flank * (root + np.maximum(b - fin.base, 0.0) * kl)
+    out = sp * flank * (root + np.maximum(b - fin.base, 0.0) * kl)
     pts = place.project(fx + a * tx - b * kv * ty, fy + a * ty + b * kv * tx, out + fin.hw * abs(sp))
     return [pts[lo:hi] for lo, hi in (fin.spans if abs(sp) > BLADE_ON else fin.spans[:1])], near
 
@@ -266,7 +268,7 @@ def _place(place: Placement) -> tuple[list[np.ndarray], list[Layer]]:
     """
     rig, pose = place.rig, place.pose
     spin = pose.spin
-    z = spin.z
+    z = place.haze
     jaw = rig.jaw if pose.jaw_open > 0.02 else None
 
     (body_i, body_lo, body_hi), *marks = rig.fixed_spans
@@ -304,7 +306,7 @@ def _place(place: Placement) -> tuple[list[np.ndarray], list[Layer]]:
                 outlines += shapes
             end_on = abs(math.sin(spin.at(part.attach))) >= 0.5
             if near < -BEHIND:
-                back += [(tint(part.color, z - 0.3), pts) for pts in shapes]
+                back += [(tint(part.color, z + BEHIND_HAZE), pts) for pts in shapes]
             elif end_on:
                 scene.append((place.depth(part.attach) + FLANK_DEPTH * near * bool(flank), [(color, pts) for pts in shapes]))
             else:
@@ -320,36 +322,38 @@ def _place(place: Placement) -> tuple[list[np.ndarray], list[Layer]]:
     return outlines, layers + late
 
 
-def _draw_bubbles(draw: ImageDraw.ImageDraw, bubbles: Bubbles, ax: int, ay: int, bx: int, by: int, front: bool) -> None:
-    for b in bubbles.items:
-        if b.front != front:
+def _draw_bubbles(draw: ImageDraw.ImageDraw, bubbles: list[tuple[float, float, float, float, bool]], front: bool) -> None:
+    for x, y, r, fade, in_front in bubbles:
+        if in_front != front:
             continue
-        fade = 1.0 - (b.age / b.life) ** 2
-        x, y, r = (b.x - ax) * SS - bx, (b.y - ay) * SS - by, b.r * SS
         fill, line = int(46 * fade), int(215 * fade)
         draw.ellipse((x - r, y - r, x + r, y + r), fill=(fill,) * 4, outline=(line,) * 4, width=max(1, SS - 1))
 
 
-def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, x: float, y: float) -> Sprite:
-    """Draw the animal centred on screen position (x, y).
+def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, cam: Camera, x: float, y: float, z: float) -> Sprite:
+    """Draw the animal at world position (x, y, z) as the camera sees it.
 
     The canvas is premultiplied "RGBa" from the start (opaque parts have alpha
     255, bubbles use equal colour and alpha), so the box reduce is a correct
     premultiplied downsample with no per-frame RGBA/RGBa conversion.
     """
-    ax, ay = round(x), round(y)
-    place = Placement(rig, pose, lay.length * SS, ((x - ax) * SS, (y - ay) * SS))
+    sx, sy, s = cam.to_screen(x, y, z)
+    ax, ay = round(sx), round(sy)
+    place = Placement(rig, pose, lay.length * SS * s, ((sx - ax) * SS, (sy - ay) * SS), cam.haze(z))
     outlines, layers = _place(place)
 
     every = np.concatenate([pts for _, pts in layers])
     pad = rig.species.outline_px + SS
     lo_x, lo_y = every.min(axis=0) - pad
     hi_x, hi_y = every.max(axis=0) + pad
+    drops = []
     for b in bubbles.items:
-        r = (b.r + 1) * SS
-        bxc, byc = (b.x - ax) * SS, (b.y - ay) * SS
-        lo_x, hi_x = min(lo_x, bxc - r), max(hi_x, bxc + r)
-        lo_y, hi_y = min(lo_y, byc - r), max(hi_y, byc + r)
+        px, py, ps = cam.to_screen(b.x, b.y, b.z)
+        r = b.r * ps * SS
+        bxc, byc = (px - ax) * SS, (py - ay) * SS
+        drops.append((bxc, byc, r, 1.0 - (b.age / b.life) ** 2, b.front))
+        lo_x, hi_x = min(lo_x, bxc - r - SS), max(hi_x, bxc + r + SS)
+        lo_y, hi_y = min(lo_y, byc - r - SS), max(hi_y, byc + r + SS)
     cap = lay.half * SS
     bx = max(-cap, math.floor(lo_x / SS) * SS)
     by = max(-cap, math.floor(lo_y / SS) * SS)
@@ -359,13 +363,14 @@ def render(rig: Rig, pose: Pose, bubbles: Bubbles, lay: Layout, x: float, y: flo
     big = Image.new("RGBa", (w, h))
     draw = ImageDraw.Draw(big)
     shift = np.array([-bx, -by], dtype=float)
-    _draw_bubbles(draw, bubbles, ax, ay, bx, by, front=False)
+    drops = [(px - bx, py - by, r, fade, front) for px, py, r, fade, front in drops]
+    _draw_bubbles(draw, drops, front=False)
     # The rim is a slightly larger copy of each outline drawn underneath everything, because a wide
     # draw.line is several times slower.
-    rim = tint(rig.outline_color, pose.spin.z)
+    rim = tint(rig.outline_color, place.haze)
     for pts in _grown(outlines, rig.species.outline_px):
         draw.polygon((pts + shift).ravel().tolist(), fill=rim)
     for color, pts in layers:
         draw.polygon((pts + shift).ravel().tolist(), fill=color)
-    _draw_bubbles(draw, bubbles, ax, ay, bx, by, front=True)
-    return Sprite(big.reduce(SS), ax + bx // SS, ay + by // SS)
+    _draw_bubbles(draw, drops, front=True)
+    return Sprite(big.reduce(SS), ax + bx // SS, ay + by // SS, cam.fade(z))

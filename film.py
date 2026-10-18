@@ -9,23 +9,24 @@ from PIL import Image, ImageDraw, ImageFont
 from anatomy import Rig, compile_species
 from behavior import OrcaMode, Transition, World
 from bubbles import Bubbles
-from projection import Pose
+from projection import Camera, Pose, Rect
 from render import Layout, Sprite, render
 from sim import DT, new_world
 from species import ORCA, SALMON
 
 SHEET_BG = (96, 140, 176, 255)
 FILM_BG = (22, 29, 39, 255)
+INK = (220, 230, 240, 255)
 
 
 def grid(rig: Rig, lay: Layout, poses: list[Pose], cols: int) -> Image.Image:
     cw, ch = math.ceil(2 * rig.reach * lay.length), math.ceil(rig.reach * lay.length)
     rows = math.ceil(len(poses) / cols)
     sheet = Image.new("RGBA", (cw * cols, ch * rows), SHEET_BG)
+    cam = Camera(Rect(0, 0, sheet.width, sheet.height), 1e9)
     for k, pose in enumerate(poses):
         cx, cy = (k % cols) * cw + cw / 2, (k // cols) * ch + ch / 2
-        s = render(rig, pose, Bubbles(), lay, cx, cy)
-        sheet.alpha_composite(s.image.convert("RGBA"), (s.x, s.y))
+        blit(sheet, render(rig, pose, Bubbles(), lay, cam, cx, cy, 0.0))
     return sheet
 
 
@@ -50,20 +51,24 @@ def make_sheet() -> Image.Image:
     ])
 
 
-def _blit(canvas: Image.Image, sprite: Sprite) -> None:
+def blit(canvas: Image.Image, sprite: Sprite, dx: float = 0.0, dy: float = 0.0) -> None:
+    """Composite a sprite where it says it goes, shifted by (dx, dy), with its depth fade."""
     rgba = sprite.image.convert("RGBA")
-    canvas.paste(rgba, (sprite.x, sprite.y), rgba)
+    if sprite.alpha < 1.0:
+        rgba.putalpha(rgba.getchannel("A").point(lambda v: round(v * sprite.alpha)))
+    canvas.paste(rgba, (round(sprite.x + dx), round(sprite.y + dy)), rgba)
 
 
 def snapshot(world: World, lays: tuple[Layout, Layout]) -> Image.Image:
-    """The whole work area with both actors where they truly are."""
+    """The whole work area with both actors where they truly are, the farther one first."""
     a = world.area
     canvas = Image.new("RGBA", (round(a.right - a.left), round(a.bottom - a.top)), FILM_BG)
     f, o = world.fish, world.orca
+    actors = [(o.body, world.orca_rig, o.pose(), o.bubbles, lays[0])]
     if f:
-        _blit(canvas, render(world.fish_rig, f.pose(), Bubbles(), lays[1], f.body.x - a.left, f.body.y - a.top))
-    _blit(canvas, render(world.orca_rig, o.pose(), o.bubbles, lays[0],
-                         o.body.x - a.left, o.body.y - a.top))
+        actors.append((f.body, world.fish_rig, f.pose(), Bubbles(), lays[1]))
+    for body, rig, pose, bubbles, lay in sorted(actors, key=lambda actor: -actor[0].z):
+        blit(canvas, render(rig, pose, bubbles, lay, world.cam, body.x, body.y, body.z), -a.left, -a.top)
     return canvas
 
 
@@ -82,12 +87,10 @@ def find_hunt(seed: int, shortest: float, longest: float, limit: float = 1200.0)
     raise RuntimeError(f"seed {seed}: no hunt of {shortest}-{longest}s in {limit:.0f}s")
 
 
-def make_film(seed: int, frames: int = 12, step: float = 0.5, cols: int = 3, width: int = 640) -> Image.Image:
-    """Contact sheet of one hunt, from just before the stalk to half a second after the catch."""
-    span = (frames - 2) * step
-    catch = find_hunt(seed, span - 0.7, span)
-    start = catch - span
+def _sheet(seed: int, start: float, frames: int, step: float, cols: int, width: int, mark: float) -> Image.Image:
+    """`frames` full-screen shots `step` seconds apart from `start`, labelled relative to `mark`."""
     world = new_world(seed)
+    cam = world.cam
     lays = (Layout.for_rig(world.orca_rig, world.orca_length), Layout.for_rig(world.fish_rig, world.orca_length))
     a = world.area
     height = round(width * (a.bottom - a.top) / (a.right - a.left))
@@ -98,12 +101,20 @@ def make_film(seed: int, frames: int = 12, step: float = 0.5, cols: int = 3, wid
         while world.t < until - DT / 2:
             world.step(DT)
         img = snapshot(world, lays).resize((width, height), Image.LANCZOS)
-        fish = world.fish.mode.name if world.fish else "-"
+        o, f = world.orca, world.fish
+        fish = f"salmon {f.mode.name} {cam.scale(f.body.z):.2f}x" if f else "salmon -"
         d = ImageDraw.Draw(img)
-        d.text((8, 6), f"t{world.t - catch:+.1f}s  orca {world.orca.mode.name}  salmon {fish}", fill=(220, 230, 240, 255), font=font)
+        d.text((8, 6), f"t{world.t - mark:+.1f}s  orca {o.mode.name} {cam.scale(o.body.z):.2f}x  {fish}", fill=INK, font=font)
         shots.append(img)
     rows = math.ceil(frames / cols)
     sheet = Image.new("RGBA", (cols * width + (cols + 1) * 4, rows * height + (rows + 1) * 4), (60, 70, 85, 255))
     for k, img in enumerate(shots):
         sheet.paste(img, (4 + (k % cols) * (width + 4), 4 + (k // cols) * (height + 4)))
     return sheet
+
+
+def make_film(seed: int, frames: int = 12, step: float = 0.5, cols: int = 3, width: int = 640) -> Image.Image:
+    """Contact sheet of one hunt, from just before the stalk to half a second after the catch."""
+    span = (frames - 2) * step
+    catch = find_hunt(seed, span - 0.7, span)
+    return _sheet(seed, catch - span, frames, step, cols, width, catch)

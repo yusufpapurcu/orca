@@ -1,4 +1,4 @@
-"""Animated orca that swims across the Windows desktop in a click-through overlay.
+"""Animated orca that hunts a salmon in 3D across the Windows desktop in click-through overlays.
 
 Anatomy is declared once in body space, deformed by a travelling spine wave,
 rasterised with Pillow at 3x supersampling and pushed to layered windows with
@@ -11,7 +11,7 @@ import argparse
 import random
 import time
 
-from behavior import World, orca_length
+from behavior import Order, World, orca_length
 from bubbles import Bubbles
 from film import make_film, make_sheet
 from overlay import Overlay, primary_work_area, user32, winmm
@@ -26,16 +26,22 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
     user32.SetProcessDpiAwarenessContext(-4)
     area = primary_work_area()
     world = World(area, orca_length(area.bottom - area.top), random.Random(seed))
+    cam = world.cam
     orca_lay = Layout.for_rig(world.orca_rig, world.orca_length)
     fish_lay = Layout.for_rig(world.fish_rig, world.orca_length)
 
     winmm.timeBeginPeriod(1)
     orca_win = Overlay(orca_lay.size, "Orca", hotkey=True)
     fish_win = Overlay(fish_lay.size, "Salmon")
+    front, back = orca_win, fish_win  # whichever animal is nearer the viewer draws on top
+
+    def restack() -> None:
+        front.keep_on_top()
+        back.place_below(front)
+
     render_ms: list[float] = []
     total_ms: list[float] = []
-    turning_ms: list[float] = []
-    calm_ms: list[float] = []
+    kinds: dict[str, list[tuple[float, float]]] = {"turning": [], "deep": [], "calm": []}
     last: Sprite | None = None
     try:
         orca_win.show()
@@ -50,30 +56,39 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
             prev = t0
             for event in world.step(dt):
                 print(event, flush=True)
+                if isinstance(event, Order):
+                    front, back = (fish_win, orca_win) if event.salmon_front else (orca_win, fish_win)
+                    if fish_win.visible:
+                        restack()
 
             o, f = world.orca, world.fish
-            sprite = render(world.orca_rig, o.pose(), o.bubbles, orca_lay, o.body.x, o.body.y)
+            sprite = render(world.orca_rig, o.pose(), o.bubbles, orca_lay, cam, o.body.x, o.body.y, o.body.z)
             fish_sprite = None
             if f:
-                fish_sprite = render(world.fish_rig, f.pose(), Bubbles(), fish_lay, f.body.x, f.body.y)
+                fish_sprite = render(world.fish_rig, f.pose(), Bubbles(), fish_lay, cam, f.body.x, f.body.y, f.body.z)
             t1 = time.perf_counter()
             orca_win.present(sprite)
             if fish_sprite:
                 fish_win.present(fish_sprite)
                 if fish_win.show():
-                    fish_win.place_below(orca_win)
+                    restack()
             else:
                 fish_win.hide()
             t2 = time.perf_counter()
             render_ms.append((t1 - t0) * 1000)
             total_ms.append((t2 - t0) * 1000)
-            (turning_ms if o.body.att.turning or (f and f.body.att.turning) else calm_ms).append(((t2 - t0) * 1000, (t1 - t0) * 1000))
+            if abs(o.body.att.rate) > 0.5 or not o.body.settled:
+                kind = "turning"
+            elif o.body.z > cam.mid:
+                kind = "deep"
+            else:
+                kind = "calm"
+            kinds[kind].append(((t2 - t0) * 1000, (t1 - t0) * 1000))
             last = sprite
             n += 1
 
             if t2 > next_top:
-                orca_win.keep_on_top()
-                fish_win.place_below(orca_win)
+                restack()
                 next_top = t2 + 2.0
             target += FRAME_TIME
             now = time.perf_counter()
@@ -94,7 +109,7 @@ def run(frames: int | None, snapshot: str | None, seed: int | None) -> None:
         print(f"frames={len(total_ms)} orca={orca_lay.length}px salmon={fish_lay.length}px "
               f"render avg={sum(render_ms) / len(render_ms):.2f}ms "
               f"render+present avg={sum(total_ms) / len(total_ms):.2f}ms max={max(total_ms):.2f}ms")
-    for name, ms in (("turning", turning_ms), ("calm", calm_ms)):
+    for name, ms in kinds.items():
         if ms:
             tot, rend = zip(*ms)
             print(f"  {name}: frames={len(ms)} render+present avg={sum(tot) / len(tot):.2f}ms (render {sum(rend) / len(rend):.2f}ms) max={max(tot):.2f}ms")
@@ -115,11 +130,12 @@ def main() -> None:
     ap.add_argument("--sim", type=float, metavar="SECONDS",
                     help="run the simulation headless, print every transition and a summary, and exit")
     args = ap.parse_args()
+    seed = args.seed if args.seed is not None else 0
     if args.sim:
-        print(simulate(args.sim, args.seed if args.seed is not None else 0))
+        print(simulate(args.sim, seed))
         return
     if args.film:
-        make_film(args.seed if args.seed is not None else 0).save(args.film)
+        make_film(seed).save(args.film)
         print(f"film saved to {args.film}")
         return
     if args.turns:

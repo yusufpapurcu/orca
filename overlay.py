@@ -8,7 +8,7 @@ from ctypes import wintypes
 
 import numpy as np
 
-from kinematics import Rect
+from projection import Rect
 from render import Sprite
 
 LRESULT = ctypes.c_ssize_t
@@ -168,6 +168,7 @@ class Overlay:
         w, h = sprite.image.size
         self.pixels[:h, :w] = np.frombuffer(sprite.image.tobytes("raw", "BGRa"), dtype=np.uint8).reshape(h, w, 4)
         pos, size = wintypes.POINT(sprite.x, sprite.y), wintypes.SIZE(w, h)
+        self.blend.SourceConstantAlpha = round(255 * sprite.alpha)
         ok = user32.UpdateLayeredWindow(
             self.hwnd, self.screen_dc, ctypes.byref(pos), ctypes.byref(size), self.mem_dc,
             ctypes.byref(self.src_origin), 0, ctypes.byref(self.blend), ULW_ALPHA)
@@ -191,6 +192,7 @@ class Overlay:
         user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def place_below(self, other: "Overlay") -> None:
+        """Put this window right under `other` in the z-order, both staying topmost."""
         user32.SetWindowPos(self.hwnd, other.hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def pump(self) -> bool:
