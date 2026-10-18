@@ -1,4 +1,4 @@
-"""Contact sheets for looking at the animals and a hunt without a window."""
+"""Contact sheets for looking at the animals, a hunt and a dive without a window."""
 
 from __future__ import annotations
 
@@ -87,6 +87,15 @@ def find_hunt(seed: int, shortest: float, longest: float, limit: float = 1200.0)
     raise RuntimeError(f"seed {seed}: no hunt of {shortest}-{longest}s in {limit:.0f}s")
 
 
+def find_catch(seed: int, limit: float = 1200.0) -> float:
+    world = new_world(seed)
+    while world.t < limit:
+        for e in world.step(DT):
+            if isinstance(e, Transition) and e.new is OrcaMode.CHOMP:
+                return e.t
+    raise RuntimeError(f"seed {seed}: no catch in {limit:.0f}s")
+
+
 def _sheet(seed: int, start: float, frames: int, step: float, cols: int, width: int, mark: float) -> Image.Image:
     """`frames` full-screen shots `step` seconds apart from `start`, labelled relative to `mark`."""
     world = new_world(seed)
@@ -118,3 +127,9 @@ def make_film(seed: int, frames: int = 12, step: float = 0.5, cols: int = 3, wid
     span = (frames - 2) * step
     catch = find_hunt(seed, span - 0.7, span)
     return _sheet(seed, catch - span, frames, step, cols, width, catch)
+
+
+def make_dive(seed: int, frames: int = 12, step: float = 1.0, cols: int = 3, width: int = 640) -> Image.Image:
+    """Contact sheet from a catch: the orca swims off into the deep and comes back for the next salmon."""
+    catch = find_catch(seed)
+    return _sheet(seed, catch - 0.5, frames, step, cols, width, catch)

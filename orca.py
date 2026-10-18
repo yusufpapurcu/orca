@@ -13,11 +13,11 @@ import time
 
 from behavior import Order, World, orca_length
 from bubbles import Bubbles
-from film import make_film, make_sheet
+from film import make_dive, make_film, make_sheet
 from overlay import Overlay, primary_work_area, user32, winmm
 from render import Layout, Sprite, render
 from sim import simulate
-from turns import make_turn_gif, make_turn_sheet
+from turns import make_depth_gif, make_turn_gif, make_turn_sheet
 
 FRAME_TIME = 1 / 60
 
@@ -125,8 +125,10 @@ def main() -> None:
     ap.add_argument("--seed", type=int, help="seed the random number generator")
     ap.add_argument("--sheet", help="render the tail beats and the jaw to this PNG and exit (no window)")
     ap.add_argument("--film", help="render a contact sheet of one hunt to this PNG and exit (no window)")
+    ap.add_argument("--dive", help="render a contact sheet of the orca swimming off into the deep after a catch and coming back, to this PNG, and exit")
     ap.add_argument("--turns", help="render 12 frames across a turn toward and away from the viewer, for both animals, to this PNG and exit")
     ap.add_argument("--turn-gif", metavar="PREFIX", help="write PREFIX-orca.gif and PREFIX-salmon.gif of a few turns at true speed and exit")
+    ap.add_argument("--depth-gif", metavar="PATH", help="write a GIF of the orca diving away into the deep and returning, and exit")
     ap.add_argument("--sim", type=float, metavar="SECONDS",
                     help="run the simulation headless, print every transition and a summary, and exit")
     args = ap.parse_args()
@@ -138,6 +140,10 @@ def main() -> None:
         make_film(seed).save(args.film)
         print(f"film saved to {args.film}")
         return
+    if args.dive:
+        make_dive(seed).save(args.dive)
+        print(f"dive saved to {args.dive}")
+        return
     if args.turns:
         make_turn_sheet().save(args.turns)
         print(f"turns saved to {args.turns}")
@@ -146,6 +152,10 @@ def main() -> None:
         for kind in ("orca", "salmon"):
             make_turn_gif(kind, f"{args.turn_gif}-{kind}.gif")
             print(f"saved {args.turn_gif}-{kind}.gif")
+        return
+    if args.depth_gif:
+        make_depth_gif(args.depth_gif)
+        print(f"saved {args.depth_gif}")
         return
     if args.sheet:
         make_sheet().save(args.sheet)

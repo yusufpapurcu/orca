@@ -1,8 +1,8 @@
-"""Scripted turns for looking at the 3D turn without a window: a contact sheet and GIFs.
+"""Scripted swims for looking at the 3D motion without a window: turn sheets and GIFs.
 
 They drive a real Body with the real steering, edge avoidance and camera, so
 what they show is what the desktop shows. Nothing here is a second
-implementation of the turn.
+implementation of the turn or the dive.
 """
 
 from __future__ import annotations
@@ -14,16 +14,18 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageFont
 
 from anatomy import Rig, compile_species
-from behavior import EDGE_PAD, FISH_BEAT_SPEED, FISH_GAITS, ORCA_BEAT_SPEED, ORCA_GAITS, REF_LENGTH, FishMode, OrcaMode
+from behavior import (EDGE_PAD, FISH_BEAT_SPEED, FISH_GAITS, ORCA_BEAT_SPEED, ORCA_GAITS, REF_LENGTH, FishMode, OrcaMode,
+                      orca_length)
 from bubbles import Bubbles
 from film import blit
-from kinematics import Body, Vec, accelerate, advance, avoid_edges, steer, unit
+from kinematics import Body, Vec, accelerate, advance, avoid_edges, dist, steer, sub, unit
 from projection import FOCAL, Camera, Rect
 from render import Layout, render
 from species import ORCA, SALMON
 
 DT = 1 / 60
 BLUE = (96, 140, 176, 255)
+SEA = (14, 24, 36, 255)
 GUIDE = (70, 105, 135, 255)
 INK = (240, 246, 250, 255)
 FONT = ImageFont.load_default(size=13)
@@ -186,5 +188,39 @@ def make_turn_gif(kind: str, path: str, orca_len: float = 300.0) -> None:
     for b in bodies:
         img = Image.new("RGBA", (w, h), BLUE)
         sw.draw(img, b)
+        frames.append(img.convert("RGB"))
+    _save_gif(frames, path)
+
+
+def make_depth_gif(path: str, seconds: float = 8.0) -> None:
+    """The orca dives away into the deep and comes back, on a dark sea at true screen motion, scaled to fit.
+
+    The world is a real work area with the real camera, so the sizes, the haze
+    and the fade are what the desktop shows. The frame is the middle of the
+    screen, scaled down.
+    """
+    area = Rect(0, 0, 1920, 1032)
+    orca_len = orca_length(1032)
+    sw = Swimmer.make("orca", orca_len, area, 560.0, 560.0, 0.0, speed=170.0)
+    cam = sw.cam
+    deep = (1350.0, 420.0, cam.near + 0.88 * (cam.far - cam.near))
+    home = (1000.0, 600.0, 0.0)
+    waypoint = deep
+    crop = (210, 90, 1710, 940)
+    scale = 0.56
+    size = (round((crop[2] - crop[0]) * scale), round((crop[3] - crop[1]) * scale))
+    frames = []
+    for f in range(round(seconds * 30)):
+        t = f / 30
+        if waypoint is deep and (t > 4.0 or dist(sw.body.pos, deep) < 0.6 * orca_len):
+            waypoint = home
+        want = unit(sub(waypoint, sw.body.pos)) if t > 0.4 else (1.0, 0.0, 0.0)
+        sw.step(want)
+        sw.step(want)
+        img = Image.new("RGBA", area[2:], SEA)
+        sw.draw(img, sw.body)
+        img = img.crop(crop).resize(size, Image.LANCZOS)
+        b = sw.body
+        ImageDraw.Draw(img).text((8, 6), f"t {t:4.1f}s   z {b.z:4.0f} px  {cam.scale(b.z):.2f}x  {'diving' if waypoint is deep else 'returning'}", fill=INK, font=FONT)
         frames.append(img.convert("RGB"))
     _save_gif(frames, path)
